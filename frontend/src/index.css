@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    background-color: #0b0c10;
+    color: #f4f4f5;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(161, 161, 170, 0.22);
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(161, 161, 170, 0.4);
+  }
+}
+
+.zuno-prose {
+  font-size: 0.9375rem;
+  line-height: 1.7;
+  color: #e4e4e7;
+}
+.zuno-prose p {
+  margin-bottom: 0.75rem;
+}
+.zuno-prose p:last-child {
+  margin-bottom: 0;
+}
+.zuno-prose ul,
+.zuno-prose ol {
+  margin: 0.5rem 0 0.85rem 1.25rem;
+}
+.zuno-prose ul {
+  list-style-type: disc;
+}
+.zuno-prose ol {
+  list-style-type: decimal;
+}
+.zuno-prose li {
+  margin-bottom: 0.35rem;
+  padding-left: 0.15rem;
+}
+.zuno-prose h1,
+.zuno-prose h2,
+.zuno-prose h3 {
+  font-weight: 600;
+  color: #fafafa;
+  margin-top: 1rem;
+  margin-bottom: 0.45rem;
+}
+.zuno-prose strong {
+  color: #fafafa;
+  font-weight: 600;
+}
+.zuno-prose blockquote {
+  border-left: 2px solid rgba(255, 255, 255, 0.2);
+  padding-left: 0.85rem;
+  color: #a1a1aa;
+  margin: 0.75rem 0;
+}
+.zuno-prose code:not(pre code) {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: #f4f4f5;
+  padding: 0.12rem 0.38rem;
+  border-radius: 0.375rem;
+  font-size: 0.84em;
+}
+
+@keyframes zunoFadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes zunoThinkRing {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.35);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(52, 211, 153, 0);
+    transform: scale(1.03);
+  }
+}
+
+@keyframes zunoWaveBar {
+  0%, 100% {
+    transform: scaleY(0.42);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes zunoTextShimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes zunoCaret {
+  0%, 100% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scaleY(0.82);
+  }
+}
+
+.zuno-msg-enter {
+  animation: zunoFadeUp 0.24s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.zuno-logo-active {
+  border-radius: 0.5rem;
+  animation: zunoThinkRing 1.6s ease-in-out infinite;
+}
+
+.zuno-wave-bar {
+  transform-origin: center bottom;
+  animation: zunoWaveBar 1.05s ease-in-out infinite;
+}
+
+.zuno-think-shimmer {
+  background: linear-gradient(90deg, #71717a 0%, #a7f3d0 50%, #71717a 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: zunoTextShimmer 1.8s linear infinite;
+}
+
+.zuno-stream-caret {
+  animation: zunoCaret 0.85s ease-in-out infinite;
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.65);
+}

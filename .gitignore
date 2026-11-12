@@ -1,0 +1,24 @@
+# Dependencies & build outputs
+frontend/node_modules/
+frontend/dist/
+backend/target/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Large local LLM weights & user-uploaded RAG files
+backend/models/
+*.gguf
+backend/ai-service/knowledge_base/
+
+# Local secrets & environment config
+backend/src/main/resources/application.properties
+.env
+.env.*
+
+# Logs & OS/IDE files
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
