@@ -11,52 +11,39 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from llama_cpp import Llama
 from pydantic import BaseModel, Field
 
+import llm_client
 import rag_store
 import tools_layer
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL_PATH = BASE_DIR / "models" / "Qwen3-4B" / "Qwen3-4B-Q4_K_M.gguf"
-MODEL_PATH = Path(os.getenv("ZUNO_MODEL_PATH", str(DEFAULT_MODEL_PATH)))
+load_dotenv()
 
-N_THREADS = int(os.getenv("ZUNO_THREADS", "4"))
-N_THREADS_BATCH = int(os.getenv("ZUNO_THREADS_BATCH", "8"))
-N_CTX = int(os.getenv("ZUNO_CTX", "2048"))
-N_BATCH = int(os.getenv("ZUNO_BATCH", "256"))
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3-4B-Q4_K_M")
 
 
-def get_base_system_prompt() -> str:
+def get_base_system_prompt(is_tamil: bool = False) -> str:
     now_ist = dt.datetime.now(dt.timezone(dt.timedelta(hours=5, minutes=30)))
     today_str = now_ist.strftime("%A, %B %d, %Y")
+    if is_tamil:
+        return (
+            "You are Zuno (ZERO), a helpful assistant.\n"
+            f"Today: {today_str}.\n"
+            "Rules for Tamil:\n"
+            "1. Reply in clear, natural, grammatically correct Tamil script (தமிழ்) using 2-3 short sentences.\n"
+            "2. Provide accurate historical facts based on context. Raja Raja Cholan (முதலாம் இராசராச சோழன்) is the great Chola emperor who built Thanjavur Brihadisvara Temple (தஞ்சைப் பெரிய கோயில்). Never confuse historical kings with grammar ('இலக்கணம்') or food ('சோளம்').\n"
+            "3. Never repeat any sentence."
+        )
     return (
         "You are Zuno (ZERO), a helpful, accurate personal AI assistant.\n\n"
-        "GENERAL BEHAVIOR:\n"
-        "1. Answer the user's actual question directly.\n"
-        "2. Use simple, natural English unless another language (e.g. Tamil) is requested.\n"
-        "3. Give short answers to simple questions; explain in detail when explicitly requested.\n"
-        "4. Understand follow-up messages using conversation history.\n"
-        "5. Never repeat the same information unnecessarily.\n\n"
-        "CURRENT INFORMATION & REAL-TIME ACCURACY:\n"
-        f"1. Today's current date is {today_str} (Year {now_ist.year}).\n"
-        "2. Never assume pretrained knowledge (cutoff July 2024) is current. Real-world offices, elections, and events change.\n"
-        "3. For current events, politicians, office holders (e.g. Chief Ministers, Prime Ministers, Governors, Presidents), political parties, election results, and news, strictly rely on provided live web results or tools.\n"
-        "4. Never state 'I cannot check the internet' or 'my knowledge is limited to July 2024' — live search tools are integrated and active.\n"
-        "5. When live web results are provided, cite and use them directly without contradiction.\n\n"
-        "USER CORRECTIONS:\n"
-        "1. Treat user corrections as factual updates that require verification, not debate.\n"
-        "2. Do NOT argue with the user using outdated pretrained knowledge.\n"
-        "3. When the user provides a correction on a changing fact (such as current office holders or election winners), verify and confirm the updated status gracefully.\n\n"
-        "DATE AND TIME:\n"
-        f"1. Always use the current year ({now_ist.year}) and system date ({today_str}).\n"
-        "2. Never guess today's date from training data.\n\n"
-        "UNCERTAINTY & CONVERSATION:\n"
-        "1. Never invent facts or confuse historical names with grammar terms.\n"
-        "2. Understand abbreviations and common entity names (e.g. TVK = Tamilaga Vettri Kazhagam, CM = Chief Minister).\n"
-        "3. Use previous messages to understand ambiguous references."
+        f"Today's date is {today_str} (Year {now_ist.year}).\n"
+        "1. Answer concisely in natural language directly.\n"
+        "2. For current events, offices (CM, PM, TVK = Tamilaga Vettri Kazhagam, Vijay), strictly rely on provided live web context. Never say 'I cannot check the internet' — web search is active.\n"
+        "3. When user provides updates or corrections, verify and confirm them gracefully without debate.\n"
+        "4. Historical entities: Raja Raja Cholan / Cholas / Pandyas are ancient kings and empires, never grammar terms."
     )
 
 INTENT_SETTINGS = {
@@ -120,12 +107,9 @@ _CODE_DOMAIN_RE = re.compile(
     r"rest\s*api|endpoint|html|css|c\+\+|code|program|class|function|method)\b|```|@"
 )
 
-llm_instance: Llama | None = None
-llm_lock = threading.Lock()
-inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zuno-llm")
+inference_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="zuno-llm")
 active_cancel_lock = threading.Lock()
 active_cancel_event: threading.Event | None = None
-model_load_seconds: float = 0.0
 
 
 def clean_text(text: str) -> str:
@@ -244,7 +228,7 @@ def _language_instruction(messages: list[dict[str, str]]) -> str | None:
     if _is_tamil_turn(messages):
         return (
             "Language rule: The user requested Tamil. Reply clearly in natural, grammatical Tamil script (தமிழ்) using 2-4 short, accurate sentences or bullet points. "
-            "Provide true historical or factual information. Never confuse historical figures with grammar rules, and never repeat any sentence or phrase."
+            "Provide true historical or factual information based on the retrieved context. Never confuse historical figures (like Raja Raja Cholan / முதலாம் இராஜராஜ சோழன் / சோழ மன்னர்) with grammar rules ('இலக்கணம்') or food ('சோளம்'). Never repeat any sentence or phrase."
         )
 
     # If current turn is in English but previous messages had Tamil, explicitly reset to English
@@ -265,6 +249,7 @@ def build_qwen_prompt(
     messages: list[dict[str, str]],
     intent: str,
     augmented_context: list[str] | None = None,
+    is_tamil: bool = False,
 ) -> str:
     settings = get_response_settings(intent)
     extra_system = [
@@ -273,7 +258,7 @@ def build_qwen_prompt(
         if m.get("role") == "system" and m.get("content", "").strip()
     ]
     # Keep base system instructions + dynamic date + style at the front.
-    system_prompt = "\n".join([get_base_system_prompt(), *extra_system, f"Response guide: {settings['style']}"])
+    system_prompt = "\n".join([get_base_system_prompt(is_tamil=is_tamil), *extra_system, f"Response guide: {settings['style']}"])
     parts = [f"<|im_start|>system\n{system_prompt}<|im_end|>\n"]
     trimmed = trim_conversation(messages)
     followup_hint = _followup_instruction(messages)
@@ -294,47 +279,14 @@ def build_qwen_prompt(
     return "".join(parts)
 
 
-def warmup_model(llm: Llama) -> None:
-    """Pre-evaluate system prompt so the KV prefix cache is hot for the first user request."""
-    prompt = build_qwen_prompt([{"role": "user", "content": "Hi"}], intent="simple")
-    with llm_lock:
-        llm.create_completion(
-            prompt=prompt,
-            max_tokens=2,
-            temperature=0.5,
-            stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"],
-        )
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global llm_instance, model_load_seconds
-    if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"Model file not found at: {MODEL_PATH}")
-
-    t0 = time.perf_counter()
-    llm_instance = Llama(
-        model_path=str(MODEL_PATH),
-        n_ctx=N_CTX,
-        n_threads=N_THREADS,
-        n_threads_batch=N_THREADS_BATCH,
-        n_batch=N_BATCH,
-        last_n_tokens_size=128,
-        n_gpu_layers=0,
-        flash_attn=True,
-        use_mmap=True,
-        use_mlock=False,
-        verbose=False,
-    )
-    warmup_model(llm_instance)
-    model_load_seconds = round(time.perf_counter() - t0, 2)
-    print(f"[Zuno AI] Loaded & warmed {MODEL_PATH.name} in {model_load_seconds}s "
-          f"(threads={N_THREADS}, batch={N_BATCH}, ctx={N_CTX}, repeat_last_n=128)")
+    health_status = llm_client.check_server_health()
+    print(f"[Zuno AI] Connected to remote inference server: {health_status}")
     yield
-    llm_instance = None
 
 
-app = FastAPI(title="Zuno Local Model Service", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Zuno AI Service", version="2.0.0", lifespan=lifespan)
 
 
 class ChatMessage(BaseModel):
@@ -354,12 +306,13 @@ class ChatRequest(BaseModel):
 
 @app.get("/health")
 def health():
+    health_info = llm_client.check_server_health()
     return {
-        "status": "ok" if llm_instance is not None else "loading",
-        "ready": llm_instance is not None,
-        "model": MODEL_PATH.name,
-        "loadSeconds": model_load_seconds,
-        "threads": N_THREADS,
+        "status": "ok" if health_info.get("ready") else "degraded",
+        "ready": health_info.get("ready", False),
+        "server": health_info.get("url"),
+        "model": health_info.get("model", MODEL_NAME),
+        "pingMs": health_info.get("pingMs", 0),
         "docsCount": len(rag_store.list_docs()),
     }
 
@@ -555,81 +508,70 @@ def _run_inference(
     stream = None
 
     try:
-        with llm_lock:
-            generated_tokens = 0
-            in_think = False
-            first_token_at: float | None = None
-            stream = llm_instance.create_completion(
-                prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.8,
-                top_k=20,
-                min_p=0.05,
-                repeat_penalty=repeat_penalty,
-                presence_penalty=0.0,
-                stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"],
-                stream=True,
-            )
-            for item in stream:
-                if cancel_event.is_set():
-                    break
+        generated_tokens = 0
+        in_think = False
+        first_token_at: float | None = None
+        for delta, finish_reason in llm_client.stream_completion(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"],
+            cancel_event=cancel_event,
+        ):
+            if cancel_event.is_set():
+                break
 
-                choice = item["choices"][0]
-                if choice.get("finish_reason") == "length":
-                    hit_length = True
-                delta = choice.get("text", "")
-                if delta:
-                    if "<think>" in delta:
-                        before_think, after_think = delta.split("<think>", 1)
-                        if "</think>" in after_think:
-                            delta = before_think + after_think.split("</think>", 1)[1]
-                            in_think = False
-                        else:
-                            in_think = True
-                            delta = before_think
-                    elif in_think:
-                        if "</think>" in delta:
-                            in_think = False
-                            delta = delta.split("</think>", 1)[1]
-                        else:
-                            delta = ""
+            if finish_reason == "length":
+                hit_length = True
 
-                if delta:
-                    now = time.perf_counter()
-                    if first_token_at is None:
-                        first_token_at = now
-                        first_token_ms = int((now - start) * 1000)
-                    generated_tokens += 1
-                    chunks.append(delta)
-                    out_queue.put(("token", delta))
-                    if (generated_tokens >= 18 and ("\n" in delta or "." in delta or "!" in delta or "?" in delta)) or generated_tokens % 16 == 0:
-                        if _has_stream_repetition_loop("".join(chunks)):
-                            stopped_by_repetition = True
-                            break
+            if delta:
+                if "<think>" in delta:
+                    before_think, after_think = delta.split("<think>", 1)
+                    if "</think>" in after_think:
+                        delta = before_think + after_think.split("</think>", 1)[1]
+                        in_think = False
+                    else:
+                        in_think = True
+                        delta = before_think
+                elif in_think:
+                    if "</think>" in delta:
+                        in_think = False
+                        delta = delta.split("</think>", 1)[1]
+                    else:
+                        delta = ""
 
+            if delta:
                 now = time.perf_counter()
-                if (first_token_at is not None and (now - first_token_at) >= max_seconds) or (now - start) >= max_seconds + 20.0:
-                    stopped_by_budget = True
-                    break
+                if first_token_at is None:
+                    first_token_at = now
+                    first_token_ms = int((now - start) * 1000)
+                generated_tokens += 1
+                chunks.append(delta)
+                out_queue.put(("token", delta))
+                if (generated_tokens >= 18 and ("\n" in delta or "." in delta or "!" in delta or "?" in delta)) or generated_tokens % 16 == 0:
+                    if _has_stream_repetition_loop("".join(chunks)):
+                        stopped_by_repetition = True
+                        break
 
-            # Guard against rare 0-token immediate <|im_end|> emission after </think>.
-            if not cancel_event.is_set() and not clean_text("".join(chunks)):
-                retry_resp = llm_instance.create_completion(
-                    prompt=prompt + "Sure, ",
-                    max_tokens=min(max_tokens, 64),
-                    temperature=0.5,
-                    top_p=0.8,
-                    top_k=20,
-                    repeat_penalty=1.15,
-                    stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"],
-                )
-                retry_text = clean_text("Sure, " + retry_resp["choices"][0].get("text", ""))
-                if retry_text and retry_text != "Sure,":
-                    chunks.append(retry_text)
-                    out_queue.put(("token", retry_text))
-                    if first_token_ms is None:
-                        first_token_ms = int((time.perf_counter() - start) * 1000)
+            now = time.perf_counter()
+            if (first_token_at is not None and (now - first_token_at) >= max_seconds) or (now - start) >= max_seconds + 20.0:
+                stopped_by_budget = True
+                break
+
+        # Guard against rare 0-token immediate <|im_end|> emission after </think>.
+        if not cancel_event.is_set() and not clean_text("".join(chunks)):
+            retry_raw = llm_client.generate_completion(
+                prompt=prompt + "Sure, ",
+                max_tokens=min(max_tokens, 64),
+                temperature=0.5,
+                stop=["<|im_end|>", "<|endoftext|>", "<|im_start|>"],
+            )
+            retry_text = clean_text("Sure, " + retry_raw)
+            if retry_text and retry_text != "Sure,":
+                chunks.append(retry_text)
+                out_queue.put(("token", retry_text))
+                if first_token_ms is None:
+                    first_token_ms = int((time.perf_counter() - start) * 1000)
 
         if not cancel_event.is_set():
             elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -652,11 +594,6 @@ def _run_inference(
         if not cancel_event.is_set():
             out_queue.put(("error", str(exc)))
     finally:
-        if stream is not None and hasattr(stream, "close"):
-            try:
-                stream.close()
-            except Exception:
-                pass
         out_queue.put(None)
 
 
@@ -774,14 +711,21 @@ def _prepare_turn_context(
                 if key not in seen_sources:
                     seen_sources.add(key)
                     sources.append({"kind": "web", "title": item["title"], "url": item["url"]})
-            augmented_context.append(
-                "LIVE VERIFIED WEB RESULTS (Retrieved online November 2026):\n"
-                + "\n".join(web_lines)
-                + "\n\nCRITICAL INSTRUCTION FOR CURRENT FACTS:\n"
-                + "- Use these verified current facts. Never contradict them with outdated pre-2024 training data.\n"
-                + "- If the user made a statement or correction (e.g. current Chief Minister or office holder), verify it against these facts and confirm the updated status.\n"
-                + "- Cite source titles in your answer and never say you cannot access the internet."
-            )
+            if is_tamil:
+                augmented_context.append(
+                    "நேரலை உண்மைத் தகவல்கள் (Verified Facts):\n"
+                    + "\n".join(web_lines)
+                    + "\n\nவிதிகள்: மேலே உள்ள உண்மைத் தகவல்களின் அடிப்படையில் எளிய, சரியான தமிழ் வாக்கியங்களில் பதில் அளியுங்கள். இலக்கணம் அல்லது சோளம் போன்ற தொடர்பற்ற சொற்களுடன் குழப்ப வேண்டாம்."
+                )
+            else:
+                augmented_context.append(
+                    "LIVE VERIFIED WEB RESULTS (Retrieved online November 2026):\n"
+                    + "\n".join(web_lines)
+                    + "\n\nCRITICAL INSTRUCTION FOR CURRENT FACTS:\n"
+                    + "- Use these verified current facts. Never contradict them with outdated pre-2024 training data.\n"
+                    + "- If the user made a statement or correction (e.g. current Chief Minister or office holder), verify it against these facts and confirm the updated status.\n"
+                    + "- Cite source titles in your answer and never say you cannot access the internet."
+                )
 
     return None, augmented_context, tools_used, sources
 
@@ -822,7 +766,7 @@ def _submit_inference(req: ChatRequest):
         out_queue.put(None)
         return _CompletedFuture(), out_queue, cancel_event
 
-    prompt = build_qwen_prompt(raw_messages, intent, augmented_context)
+    prompt = build_qwen_prompt(raw_messages, intent, augmented_context, is_tamil=is_tamil)
     max_seconds, max_tokens = _resolve_limits(req, intent, is_tamil=is_tamil)
     repeat_penalty = 1.18 if is_tamil else 1.15
     future = inference_executor.submit(
@@ -843,16 +787,13 @@ def _submit_inference(req: ChatRequest):
 
 @app.post("/v1/chat/stream")
 async def chat_stream(req: ChatRequest):
-    if llm_instance is None:
-        raise HTTPException(status_code=503, detail="Model is still loading")
-
     _, out_queue, cancel_event = _submit_inference(req)
 
     async def event_generator():
         last_emit = time.monotonic()
         pending_item: tuple[str, object] | None = None
         # Emit initial metadata event
-        meta_payload = json.dumps({"type": "meta", "model": MODEL_PATH.name, "mode": req.mode})
+        meta_payload = json.dumps({"type": "meta", "model": MODEL_NAME, "mode": req.mode})
         yield f"event: meta\ndata: {meta_payload}\n\n"
 
         try:
@@ -928,9 +869,6 @@ async def chat_stream(req: ChatRequest):
 
 @app.post("/v1/chat")
 def chat_sync(req: ChatRequest):
-    if llm_instance is None:
-        raise HTTPException(status_code=503, detail="Model is still loading")
-
     future, out_queue, _ = _submit_inference(req)
     future.result()
 
@@ -948,7 +886,7 @@ def chat_sync(req: ChatRequest):
         elif kind == "error":
             raise HTTPException(status_code=500, detail=value)
 
-    return {**done_data, "model": MODEL_PATH.name}
+    return {**done_data, "model": MODEL_NAME}
 
 
 if __name__ == "__main__":

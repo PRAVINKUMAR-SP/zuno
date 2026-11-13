@@ -312,11 +312,8 @@ def _clean_search_query(q: str) -> str:
     is_movie = bool(re.search(r"(?i)\b(movie|film|cinema|song|actor|actress)\b|திரைப்படம்|படம்|பாடல்", q))
     is_history_entity = bool(re.search(r"(?i)\b(chola[s]?|cholan|pandya[s]?|pandiyan|chera[s]?|pallava[s]?|dynasty|emperor|king|ruler|empire)\b|சோழ|பாண்டிய|சேர|பல்லவ|மன்னர்|அரசர்", q))
     if is_history_entity and not is_movie:
-        if bool(re.search(r"[\u0B80-\u0BFF]", cleaned)):
-            if "வரலாறு" not in cleaned:
-                cleaned += " வரலாறு"
-        else:
-            if "history" not in cleaned.lower():
+        if not bool(re.search(r"[\u0B80-\u0BFF]", cleaned)):
+            if "history" not in cleaned.lower() and "dynasty" not in cleaned.lower():
                 cleaned += " history"
 
     return cleaned if len(cleaned) >= 3 else q
@@ -374,6 +371,18 @@ def web_search(query: str, max_results: int = 2) -> list[dict]:
         return []
 
     is_movie_intent = bool(re.search(r"(?i)\b(movie|film|cinema|song)\b|திரைப்படம்|படம்", query))
+    is_history = bool(re.search(r"(?i)\b(chola[s]?|cholan|pandya[s]?|pandiyan|chera[s]?|pallava[s]?|dynasty|emperor|king|ruler|empire|temple|thanjavur|brihadisvara)\b|சோழ|பாண்டிய|சேர|பல்லவ|மன்னர்|அரசர்|கோயில்|கோவில்|தஞ்சை", query))
+    has_tamil = bool(re.search(r"[\u0B80-\u0BFF]", query))
+
+    # Fast-path for historical entities & Tamil encyclopedia queries: Wikipedia responds in ~200ms with zero rate limits
+    if (is_history or has_tamil) and not is_movie_intent:
+        wiki_hits = search_wikipedia(refined, max_results=max_results)
+        valid_wiki = [
+            h for h in wiki_hits
+            if not re.search(r"(?i)(?:திரைப்படம்|திரைக்கதை|\bfilm\b|\bmovie\b)", h["title"])
+        ]
+        if valid_wiki:
+            return valid_wiki[:max_results]
 
     results: list[dict] = []
     client = _get_http_client()
@@ -398,7 +407,7 @@ def web_search(query: str, max_results: int = 2) -> list[dict]:
                 title = _strip_html(raw_title)
                 url = _decode_ddg_href(href)
                 # Skip entertainment/movie hits when user asked about historical kings/dynasties
-                if not is_movie_intent and re.search(r"(?i)\b(திரைப்படம்|திரைக்கதை|film|movie)\b", title):
+                if not is_movie_intent and re.search(r"(?i)(?:திரைப்படம்|திரைக்கதை|\bfilm\b|\bmovie\b)", title):
                     continue
                 snip = ""
                 if idx < len(snippets):
@@ -416,7 +425,11 @@ def web_search(query: str, max_results: int = 2) -> list[dict]:
 
     # If DDG was rate-limited (status 202) or returned empty, fall back to Wikipedia
     if not results:
-        results = search_wikipedia(refined, max_results=max_results)
+        wiki_hits = search_wikipedia(refined, max_results=max_results)
+        results = [
+            h for h in wiki_hits
+            if is_movie_intent or not re.search(r"(?i)(?:திரைப்படம்|திரைக்கதை|\bfilm\b|\bmovie\b)", h["title"])
+        ]
 
     return results
 
