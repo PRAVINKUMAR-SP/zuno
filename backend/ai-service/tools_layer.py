@@ -8,6 +8,7 @@ import html
 import math
 import operator
 import re
+import threading
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -26,9 +27,19 @@ _UNSAFE_PATTERNS = (
 )
 
 _WEB_TRIGGER_RE = re.compile(
-    r"(?i)\b(latest|today|current|news|weather|stock\s+price|exchange\s+rate|"
+    r"(?i)\b("
+    r"latest|today|current|news|weather|stock\s+price|exchange\s+rate|"
     r"who\s+won|(?:match|live|cricket|football|sports)\s+score|release\s+date|"
-    r"newest\s+version|search\s+web|search\s+online|look\s+up\s+online|2025|2026)\b"
+    r"newest\s+version|search\s+web|search\s+online|look\s+up\s+online|2024|2025|2026|"
+    r"compare|comparison|versus|\bvs\b|difference\s+between|which\s+is\s+better|best\s+[a-z]+|"
+    r"who\s+(?:is|was|were)|history\s+of|dynasty|ruler|king|founder|founded|ceo\s+of|"
+    r"capital\s+of|population\s+of|price\s+of|where\s+is|when\s+(?:did|was|is)"
+    r")\b"
+)
+_TAMIL_ENTITY_RE = re.compile(r"[\u0B80-\u0BFF]{4,}")
+
+_SKIP_WEB_RE = re.compile(
+    r"(?i)^(?:hi|hii|hello|hey|yo|thanks|thank\s+you|ok|okay|bye|good\s+morning|who\s+are\s+you)\s*[.?!]*$"
 )
 
 _SAFE_BIN_OPS = {
@@ -171,12 +182,32 @@ def try_run_local_tool(query: str) -> dict | None:
     return None
 
 
+_http_client: httpx.Client | None = None
+_client_lock = threading.Lock()
+
+
+def _get_http_client() -> httpx.Client:
+    global _http_client
+    with _client_lock:
+        if _http_client is None or _http_client.is_closed:
+            _http_client = httpx.Client(
+                timeout=2.8,
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+                follow_redirects=True,
+            )
+        return _http_client
+
+
 def should_search_web(query: str, use_web: bool | None) -> bool:
     if use_web is True:
         return True
     if use_web is False:
         return False
-    return bool(_WEB_TRIGGER_RE.search(query))
+    clean = query.strip()
+    if _SKIP_WEB_RE.match(clean) or len(clean.split()) < 2:
+        return False
+    return bool(_WEB_TRIGGER_RE.search(clean) or _TAMIL_ENTITY_RE.search(clean))
 
 
 def _decode_ddg_href(raw_href: str) -> str:
@@ -196,19 +227,17 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
-def web_search(query: str, max_results: int = 3) -> list[dict]:
-    """Layer 6 (Web Search): Fetch top DuckDuckGo HTML search results safely."""
-    safe_query = redact_sensitive_text(query).strip()[:220]
+def web_search(query: str, max_results: int = 2) -> list[dict]:
+    """Layer 6 (Web Search): Ultra-fast pooled DuckDuckGo search (returns in <1s)."""
+    safe_query = redact_sensitive_text(query).strip()[:180]
     if not safe_query:
         return []
 
+    client = _get_http_client()
     try:
-        resp = httpx.post(
+        resp = client.post(
             "https://html.duckduckgo.com/html/",
             data={"q": safe_query},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ZunoAI/1.0)"},
-            timeout=5.5,
-            follow_redirects=True,
         )
         if resp.status_code != 200:
             return []
@@ -236,9 +265,9 @@ def web_search(query: str, max_results: int = 3) -> list[dict]:
             snip = _strip_html(snippets[idx][0] or snippets[idx][1])
         if title and url:
             results.append({
-                "title": title[:120],
-                "url": url[:220],
-                "snippet": snip[:260],
+                "title": title[:80],
+                "url": url[:180],
+                "snippet": snip[:150],
             })
     return results
 

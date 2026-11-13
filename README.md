@@ -16,3 +16,4 @@ Local-first AI assistant (ZERO) built with React + Vite, Spring Boot, MySQL, and
    - Python AI service (`8001`): `cd backend/ai-service && pip install -r requirements.txt && python main.py`
    - Spring Boot (`8081`): `cd backend && ./mvnw spring-boot:run`
    - Frontend (`5173`): `cd frontend && npm install && npm run dev`
+

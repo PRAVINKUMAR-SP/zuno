@@ -187,17 +187,25 @@ def _match_target_doc(docs: list[dict], query: str) -> dict:
 
 
 def _filter_docs(docs: list[dict], doc_ids: list[str] | None, query: str) -> list[dict]:
-    if doc_ids is None:
-        return docs
-    if doc_ids:
+    # If the caller specifically provided doc_ids (e.g. conversation has attachments)
+    if doc_ids is not None:
+        if not doc_ids:
+            # Conversation has no attachments - only match if the query explicitly names a document
+            q_lower = query.lower()
+            return [
+                d for d in docs
+                if d.get("name", "").lower() in q_lower
+                or (len(Path(d.get("name", "")).stem) >= 4 and Path(d.get("name", "")).stem.lower() in q_lower)
+            ]
         id_set = set(doc_ids)
         return [d for d in docs if d.get("id") in id_set]
+
+    # If doc_ids is None (direct query without doc scope):
+    # Only match if the query specifically refers to a file/document or names an uploaded file
     q_lower = query.lower()
-    return [
-        d for d in docs
-        if d.get("name", "").lower() in q_lower
-        or (len(Path(d.get("name", "")).stem) >= 4 and Path(d.get("name", "")).stem.lower() in q_lower)
-    ]
+    if _DOC_INTENT_RE.search(query) or any(Path(d.get("name", "")).stem.lower() in q_lower for d in docs):
+        return docs
+    return []
 
 
 def read_doc_preview(query: str, max_chars: int = 2600, doc_ids: list[str] | None = None) -> dict | None:
@@ -262,18 +270,25 @@ def search_docs(
         tf = Counter(toks)
         dl = len(toks)
         score = 0.0
+        matched_terms = 0
         for term in query_tokens:
             freq = tf.get(term, 0)
             if freq == 0:
                 continue
+            matched_terms += 1
             idf = math.log(1.0 + (n_chunks - df[term] + 0.5) / (df[term] + 0.5))
             denom = freq + k1 * (1.0 - b + b * (dl / max(1.0, avg_len)))
             score += idf * ((freq * (k1 + 1.0)) / denom)
 
-        if name.lower() in query_lower:
-            score += 1.5
+        is_named = name.lower() in query_lower or Path(name).stem.lower() in query_lower
+        if is_named:
+            score += 2.0
 
-        if score >= 0.65:
+        # Require either:
+        # 1. Document explicitly named in query, OR
+        # 2. At least 2 distinct query keywords match, OR
+        # 3. High BM25 score (>= 2.5)
+        if is_named or (matched_terms >= 2 and score >= 1.2) or score >= 2.5:
             scored.append((score, name, text))
 
     scored.sort(key=lambda item: item[0], reverse=True)

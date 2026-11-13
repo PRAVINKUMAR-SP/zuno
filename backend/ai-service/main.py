@@ -207,11 +207,23 @@ def _is_tamil_turn(messages: list[dict[str, str]]) -> bool:
 
 
 def _language_instruction(messages: list[dict[str, str]]) -> str | None:
-    """Add explicit Tamil clarity guidance only when the user asks in or for Tamil."""
+    """Add explicit language guidance based on the current turn, preventing language leak across turns."""
     if _is_tamil_turn(messages):
         return (
-            "Language rule: Reply clearly in natural, grammatical Tamil script (தமிழ்) using 3-4 short, accurate sentences or bullet points. "
-            "Translate proper nouns and facts accurately into standard Tamil and never repeat any sentence or phrase."
+            "Language rule: The user requested Tamil. Reply clearly in natural, grammatical Tamil script (தமிழ்) using 2-4 short, accurate sentences or bullet points. "
+            "Translate facts accurately into standard Tamil and never repeat any sentence or phrase."
+        )
+
+    # If current turn is in English but previous messages had Tamil, explicitly reset to English
+    convo = [m for m in messages if m.get("content", "").strip()]
+    had_tamil_prior = any(
+        _TAMIL_SCRIPT_RE.search(m.get("content", ""))
+        for m in convo[:-1]
+    )
+    if had_tamil_prior:
+        return (
+            "Language rule: The user's latest query is in English. Reply in clear, fluent English only. "
+            "Do NOT reply in Tamil."
         )
     return None
 
@@ -704,7 +716,7 @@ def _prepare_turn_context(
             tools_used.append("web")
             web_lines = []
             for item in web_hits:
-                web_lines.append(f"- {item['title']} ({item['url']}): {item['snippet']}")
+                web_lines.append(f"- {item['title']}: {item['snippet'][:130]}")
                 key = ("web", item["title"])
                 if key not in seen_sources:
                     seen_sources.add(key)
@@ -847,7 +859,10 @@ def chat_sync(req: ChatRequest):
 
     done_data = {"content": "", "elapsedMs": 0, "firstTokenMs": 0, "truncated": False}
     while True:
-        item = out_queue.get_nowait()
+        try:
+            item = out_queue.get(timeout=60.0)
+        except queue.Empty:
+            break
         if item is None:
             break
         kind, value = item
