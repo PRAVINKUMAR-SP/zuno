@@ -4,7 +4,10 @@ import {
   ArrowUp,
   FileText,
   Globe,
+  Languages,
   Menu,
+  Mic,
+  MicOff,
   Paperclip,
   Sparkles,
   Square,
@@ -14,6 +17,8 @@ import Sidebar from './components/Sidebar';
 import MessageBubble from './components/MessageBubble';
 import ZunoLogo from './components/ZunoLogo';
 import { useChatStream } from './hooks/useChatStream';
+import { useVoiceInput } from './hooks/useVoiceInput';
+import { SUPPORTED_LANGUAGES } from './utils/speechUtils';
 import {
   deleteConversation,
   deleteDoc,
@@ -63,6 +68,36 @@ export default function App() {
       refreshConversations();
     },
   });
+
+  const {
+    isListening,
+    isSupported: voiceSupported,
+    lang: voiceLang,
+    setLang: setVoiceLang,
+    error: voiceError,
+    toggleListening,
+    stopListening,
+  } = useVoiceInput({
+    defaultLang: 'en-IN',
+    onTranscriptChange: (text) => {
+      setInput(text);
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
+      }
+    },
+  });
+
+  const handleVoiceToggle = () => {
+    if (isStreaming) return;
+    toggleListening(input);
+  };
+
+  const handleLanguageCycle = () => {
+    const currentIdx = SUPPORTED_LANGUAGES.findIndex((l) => l.code === voiceLang);
+    const nextIdx = (currentIdx + 1) % SUPPORTED_LANGUAGES.length;
+    setVoiceLang(SUPPORTED_LANGUAGES[nextIdx].code);
+  };
 
   const refreshHealth = async () => {
     try {
@@ -163,6 +198,9 @@ export default function App() {
   };
 
   const sendMessage = async () => {
+    if (isListening) {
+      stopListening();
+    }
     const promptText = input.trim();
     if (!promptText || isStreaming) return;
 
@@ -196,7 +234,7 @@ export default function App() {
     e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
   };
 
-  const displayError = error || streamError;
+  const displayError = error || streamError || voiceError;
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#0b0c10] text-zinc-100">
@@ -286,6 +324,26 @@ export default function App() {
               </div>
             )}
 
+            {isListening && (
+              <div className="mb-2 flex items-center justify-between rounded-xl border border-red-500/25 bg-red-500/10 px-3.5 py-1.5 text-xs text-red-200 shadow-sm animate-fadeIn">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
+                  </span>
+                  <span className="font-medium">
+                    Listening ({SUPPORTED_LANGUAGES.find((l) => l.code === voiceLang)?.short || 'Voice'})... speak now
+                  </span>
+                </div>
+                <div className="flex items-center gap-1 h-3.5">
+                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-400" style={{ animationDelay: '0ms' }} />
+                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-300" style={{ animationDelay: '150ms' }} />
+                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-400" style={{ animationDelay: '300ms' }} />
+                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-300" style={{ animationDelay: '450ms' }} />
+                </div>
+              </div>
+            )}
+
             <div className="rounded-[22px] border border-white/[0.11] bg-[#15161d] px-4 pt-3 pb-2.5 shadow-[0_8px_30px_rgba(0,0,0,0.45)] transition focus-within:border-white/25">
               <textarea
                 ref={textareaRef}
@@ -340,12 +398,44 @@ export default function App() {
                     <Paperclip className="h-3 w-3" />
                     <span>{uploadingDoc ? 'Indexing...' : 'Attach doc'}</span>
                   </button>
+
+                  {voiceSupported && (
+                    <button
+                      type="button"
+                      onClick={handleLanguageCycle}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.03] px-2.5 py-1 text-[11px] font-medium text-zinc-400 transition hover:border-white/15 hover:text-zinc-200"
+                      title={`Voice recognition language: ${SUPPORTED_LANGUAGES.find((l) => l.code === voiceLang)?.label}. Click to toggle English / Tamil.`}
+                    >
+                      <Languages className="h-3 w-3 text-sky-400" />
+                      <span>{SUPPORTED_LANGUAGES.find((l) => l.code === voiceLang)?.short || 'EN'}</span>
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-2.5">
                   <span className="hidden text-[11px] text-zinc-600 sm:inline">
                     Enter to send · Shift+Enter newline
                   </span>
+
+                  {voiceSupported && !isStreaming && (
+                    <button
+                      type="button"
+                      onClick={handleVoiceToggle}
+                      className={`flex h-8 w-8 items-center justify-center rounded-full transition ${
+                        isListening
+                          ? 'zuno-mic-recording bg-red-500 text-white shadow-lg shadow-red-500/30'
+                          : 'border border-white/[0.09] bg-white/[0.04] text-zinc-300 hover:border-white/20 hover:bg-white/[0.08] hover:text-white'
+                      }`}
+                      title={isListening ? 'Stop listening (keeps speech in prompt)' : 'Voice input: Click to speak'}
+                      aria-label={isListening ? 'Stop listening' : 'Start voice input'}
+                    >
+                      {isListening ? (
+                        <MicOff className="h-4 w-4" />
+                      ) : (
+                        <Mic className="h-4 w-4" />
+                      )}
+                    </button>
+                  )}
 
                   {isStreaming ? (
                     <button
