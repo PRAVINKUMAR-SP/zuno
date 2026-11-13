@@ -160,7 +160,7 @@ public class ChatController {
 
         streamExecutor.submit(() -> {
             try {
-                sendEvent(emitter, Map.of(
+                sendEvent(emitter, "meta", Map.of(
                         "type", "meta",
                         "conversationId", prepared.conversationId(),
                         "title", prepared.title(),
@@ -175,7 +175,12 @@ public class ChatController {
                         prepared.docIds(),
                         token -> {
                             if (!cancelled.get()) {
-                                sendEventQuietly(emitter, Map.of("type", "token", "content", token), cancelUpstream);
+                                sendEventQuietly(emitter, "token", Map.of("type", "token", "content", token, "text", token), cancelUpstream);
+                            }
+                        },
+                        sources -> {
+                            if (!cancelled.get() && sources != null && !sources.isEmpty()) {
+                                sendEventQuietly(emitter, "sources", Map.of("type", "sources", "sources", sources), cancelUpstream);
                             }
                         },
                         () -> {
@@ -225,12 +230,13 @@ public class ChatController {
                 donePayload.put("mode", resolvedMode);
                 donePayload.put("toolsUsed", result.toolsUsed());
                 donePayload.put("sources", result.sources());
-                sendEvent(emitter, donePayload);
+                sendEvent(emitter, "done", donePayload);
                 emitter.complete();
             } catch (Exception ex) {
                 if (!cancelled.get()) {
-                    sendEventQuietly(emitter, Map.of(
+                    sendEventQuietly(emitter, "error", Map.of(
                             "type", "error",
+                            "code", "GENERATION_FAILED",
                             "message", ex.getMessage() == null ? "Generation failed" : ex.getMessage()
                     ), cancelUpstream);
                     emitter.completeWithError(ex);
@@ -243,13 +249,13 @@ public class ChatController {
         return emitter;
     }
 
-    private void sendEvent(SseEmitter emitter, Object payload) throws IOException {
-        emitter.send(SseEmitter.event().data(objectMapper.writeValueAsString(payload)));
+    private void sendEvent(SseEmitter emitter, String eventName, Object payload) throws IOException {
+        emitter.send(SseEmitter.event().name(eventName).data(objectMapper.writeValueAsString(payload)));
     }
 
-    private void sendEventQuietly(SseEmitter emitter, Object payload, Runnable onDisconnect) {
+    private void sendEventQuietly(SseEmitter emitter, String eventName, Object payload, Runnable onDisconnect) {
         try {
-            sendEvent(emitter, payload);
+            sendEvent(emitter, eventName, payload);
         } catch (IOException | IllegalStateException ignored) {
             if (onDisconnect != null) {
                 onDisconnect.run();

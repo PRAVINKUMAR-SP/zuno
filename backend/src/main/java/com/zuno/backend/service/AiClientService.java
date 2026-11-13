@@ -130,6 +130,19 @@ public class AiClientService {
             Runnable onKeepalive,
             AtomicBoolean cancelled,
             AtomicReference<InputStream> upstreamRef) throws Exception {
+        return streamChat(messages, mode, useWeb, docIds, onToken, null, onKeepalive, cancelled, upstreamRef);
+    }
+
+    public AiStreamResult streamChat(
+            List<AiMessage> messages,
+            String mode,
+            Boolean useWeb,
+            List<String> docIds,
+            Consumer<String> onToken,
+            Consumer<List<Map<String, String>>> onSources,
+            Runnable onKeepalive,
+            AtomicBoolean cancelled,
+            AtomicReference<InputStream> upstreamRef) throws Exception {
         String payload = buildChatPayload(messages, mode, useWeb, docIds);
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -182,8 +195,20 @@ public class AiClientService {
                 JsonNode event = objectMapper.readTree(jsonPart);
                 String type = event.path("type").asString("");
                 switch (type) {
+                    case "sources" -> {
+                        List<Map<String, String>> earlySources = parseSources(event.path("sources"));
+                        if (!earlySources.isEmpty()) {
+                            sources = earlySources;
+                            if (onSources != null) {
+                                onSources.accept(earlySources);
+                            }
+                        }
+                    }
                     case "token" -> {
                         String delta = event.path("content").asString("");
+                        if (delta.isEmpty()) {
+                            delta = event.path("text").asString("");
+                        }
                         if (!delta.isEmpty()) {
                             fullContent.append(delta);
                             onToken.accept(delta);
@@ -203,7 +228,10 @@ public class AiClientService {
                             resolvedIntent = intentVal;
                         }
                         toolsUsed = parseStringList(event.path("toolsUsed"));
-                        sources = parseSources(event.path("sources"));
+                        List<Map<String, String>> doneSources = parseSources(event.path("sources"));
+                        if (!doneSources.isEmpty()) {
+                            sources = doneSources;
+                        }
                     }
                     case "error" -> throw new IllegalStateException(
                             event.path("message").asString("Unknown AI error"));

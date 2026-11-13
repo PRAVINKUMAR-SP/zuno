@@ -13,6 +13,7 @@ import {
 import Sidebar from './components/Sidebar';
 import MessageBubble from './components/MessageBubble';
 import ZunoLogo from './components/ZunoLogo';
+import { useChatStream } from './hooks/useChatStream';
 import {
   deleteConversation,
   deleteDoc,
@@ -20,31 +21,24 @@ import {
   getMessages,
   listConversations,
   renameConversation,
-  streamChat,
   uploadDoc,
 } from './api/zunoApi';
 
 export default function App() {
   const [conversations, setConversations] = useState([]);
   const [activeId, setActiveId] = useState(null);
-  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const mode = 'auto';
   const [useWeb, setUseWeb] = useState(null); // null = auto-detect, true = always web search
   const [pendingDocs, setPendingDocs] = useState([]);
   const [uploadingDoc, setUploadingDoc] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [health, setHealth] = useState(null);
   const [error, setError] = useState('');
 
-  const abortRef = useRef(null);
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
-  const tokenBufferRef = useRef('');
-  const flushTimerRef = useRef(null);
-  const streamMetaRef = useRef({ botId: null, firstTokenMs: null });
 
   const refreshConversations = async () => {
     try {
@@ -54,6 +48,21 @@ export default function App() {
       // Handled by health check
     }
   };
+
+  const {
+    messages,
+    setMessages,
+    isStreaming,
+    error: streamError,
+    sendMessage: sendStreamMessage,
+    stopGeneration,
+    clearStream,
+  } = useChatStream({
+    onConversationCreated: (newId) => {
+      setActiveId(newId);
+      refreshConversations();
+    },
+  });
 
   const refreshHealth = async () => {
     try {
@@ -104,6 +113,7 @@ export default function App() {
   }, [messages, isStreaming]);
 
   const handleSelectConversation = async (id) => {
+    stopGeneration();
     setError('');
     setActiveId(id);
     setPendingDocs([]);
@@ -118,8 +128,8 @@ export default function App() {
 
   const handleNewChat = () => {
     if (isStreaming) return;
+    clearStream();
     setActiveId(null);
-    setMessages([]);
     setPendingDocs([]);
     setError('');
     setSidebarOpen(false);
@@ -140,41 +150,20 @@ export default function App() {
       await deleteConversation(id);
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (activeId === id) {
+        clearStream();
         setActiveId(null);
-        setMessages([]);
       }
     } catch (err) {
       setError(`Delete failed: ${err.message}`);
     }
   };
 
-  const flushTokenBuffer = () => {
-    if (flushTimerRef.current) {
-      clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
-    const buffered = tokenBufferRef.current;
-    const { botId, firstTokenMs } = streamMetaRef.current;
-    if (!buffered || !botId) return;
-    tokenBufferRef.current = '';
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === botId
-          ? { ...m, content: m.content + buffered, firstTokenMs: m.firstTokenMs ?? firstTokenMs }
-          : m
-      )
-    );
-  };
-
   const handleStop = () => {
-    flushTokenBuffer();
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setIsStreaming(false);
+    stopGeneration();
   };
 
-  const sendMessage = async (textOverride) => {
-    const promptText = (textOverride ?? input).trim();
+  const sendMessage = async () => {
+    const promptText = input.trim();
     if (!promptText || isStreaming) return;
 
     const outgoingAttachments = pendingDocs.map(({ id, name }) => ({ id, name }));
@@ -185,92 +174,13 @@ export default function App() {
       textareaRef.current.style.height = 'auto';
     }
 
-    const tempUserId = `user-${Date.now()}`;
-    const tempBotId = `bot-${Date.now() + 1}`;
-    tokenBufferRef.current = '';
-    if (flushTimerRef.current) {
-      clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
-    streamMetaRef.current = { botId: tempBotId, firstTokenMs: null };
-
-    setMessages((prev) => [
-      ...prev,
-      { id: tempUserId, role: 'user', content: promptText, attachments: outgoingAttachments },
-      { id: tempBotId, role: 'assistant', content: '', mode },
-    ]);
-
-    const startedAt = performance.now();
-    let firstTokenMs = null;
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setIsStreaming(true);
-
-    try {
-      await streamChat({
-        conversationId: activeId,
-        message: promptText,
-        mode,
-        useWeb,
-        attachments: outgoingAttachments,
-        signal: controller.signal,
-        onMeta: (meta) => {
-          if (meta.conversationId && meta.conversationId !== activeId) {
-            setActiveId(meta.conversationId);
-          }
-          refreshConversations();
-        },
-        onToken: (delta) => {
-          if (!delta || controller.signal.aborted) return;
-          if (firstTokenMs === null) {
-            firstTokenMs = Math.round(performance.now() - startedAt);
-            streamMetaRef.current.firstTokenMs = firstTokenMs;
-          }
-          tokenBufferRef.current += delta;
-          if (!flushTimerRef.current) {
-            flushTimerRef.current = setTimeout(flushTokenBuffer, 40);
-          }
-        },
-        onDone: (doneEvt) => {
-          flushTokenBuffer();
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === tempBotId
-                ? {
-                    ...m,
-                    id: doneEvt.messageId || tempBotId,
-                    content: doneEvt.content || m.content,
-                    responseTimeMs: doneEvt.elapsedMs,
-                    firstTokenMs: firstTokenMs ?? m.firstTokenMs,
-                    mode: doneEvt.mode || mode,
-                    toolsUsed: doneEvt.toolsUsed || [],
-                    sources: doneEvt.sources || [],
-                  }
-                : m
-            )
-          );
-          refreshConversations();
-        },
-        onError: (err) => {
-          flushTokenBuffer();
-          setError(err.message);
-        },
-      });
-    } catch (err) {
-      flushTokenBuffer();
-      if (err.name !== 'AbortError') {
-        setError(err.message || 'Failed to get response from Zuno backend.');
-        setMessages((prev) => prev.filter((m) => m.id !== tempBotId || m.content));
-      }
-    } finally {
-      if (flushTimerRef.current) {
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = null;
-      }
-      tokenBufferRef.current = '';
-      abortRef.current = null;
-      setIsStreaming(false);
-    }
+    sendStreamMessage({
+      conversationId: activeId,
+      message: promptText,
+      mode,
+      useWeb,
+      attachments: outgoingAttachments,
+    });
   };
 
   const handleKeyDown = (e) => {
@@ -285,6 +195,8 @@ export default function App() {
     e.target.style.height = 'auto';
     e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
   };
+
+  const displayError = error || streamError;
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#0b0c10] text-zinc-100">
@@ -318,10 +230,10 @@ export default function App() {
           </div>
         </header>
 
-        {error && (
+        {displayError && (
           <div className="mx-auto mt-3 flex w-full max-w-3xl items-center gap-2 rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
             <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
-            <span className="flex-1">{error}</span>
+            <span className="flex-1">{displayError}</span>
           </div>
         )}
 

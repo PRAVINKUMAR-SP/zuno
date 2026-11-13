@@ -31,6 +31,8 @@ BASE_SYSTEM_PROMPT = (
     "You are Zuno, an intelligent and accurate personal AI assistant. "
     "Understand English, Tamil, and Romanized Tamil (Tanglish). "
     "Reply in clear, natural English by default, or in accurate, grammatical Tamil script (தமிழ்) when Tamil is requested. "
+    "When explaining historical figures, dynasties, rulers, or events, provide accurate historical facts (reign, empire, architecture, achievements). "
+    "Never confuse historical names with grammar terms or linguistic concepts. "
     "Provide factual, direct answers without repeating sentences or paragraphs, and only cite saved user facts when relevant."
 )
 
@@ -183,13 +185,21 @@ def get_response_settings(intent: str) -> dict:
 
 
 def _followup_instruction(messages: list[dict[str, str]]) -> str | None:
-    """Add a compact follow-up anchor when the user's latest turn is short or refers to prior context."""
+    """Add a compact follow-up anchor only when the user's latest turn actually refers to prior context."""
     convo = [m for m in messages if m.get("role") in ("user", "assistant") and m.get("content", "").strip()]
     if len(convo) < 2:
         return None
     last_user = convo[-1]["content"].strip()
-    words = last_user.split()
-    if len(words) <= 8 or re.search(r"(?i)\b(this|that|it|above|example|previous|same|more)\b", last_user):
+    is_reference = bool(re.search(
+        r"(?i)\b(this|that|it|above|example|previous|same|more|continue|elaborate|why|how\s+so|tell\s+me\s+more)\b",
+        last_user,
+    ))
+    is_format_directive = bool(re.search(
+        r"(?i)\b(in\s+tamil|in\s+python|in\s+java|in\s+detail|give\s+an\s+example|code\s+example)\b",
+        last_user,
+    )) and len(last_user.split()) <= 4
+
+    if is_reference or is_format_directive:
         return "Conversation rule: Treat the latest user message as a direct follow-up to the immediately preceding topic in the chat history."
     return None
 
@@ -211,7 +221,7 @@ def _language_instruction(messages: list[dict[str, str]]) -> str | None:
     if _is_tamil_turn(messages):
         return (
             "Language rule: The user requested Tamil. Reply clearly in natural, grammatical Tamil script (தமிழ்) using 2-4 short, accurate sentences or bullet points. "
-            "Translate facts accurately into standard Tamil and never repeat any sentence or phrase."
+            "Provide true historical or factual information. Never confuse historical figures with grammar rules, and never repeat any sentence or phrase."
         )
 
     # If current turn is in English but previous messages had Tamil, explicitly reset to English
@@ -358,10 +368,12 @@ def _resolve_limits(req: ChatRequest, intent: str, is_tamil: bool = False) -> tu
     max_sec = req.max_seconds if req.max_seconds is not None else float(settings["max_seconds"])
     max_tok = req.max_tokens if req.max_tokens is not None else int(settings["max_tokens"])
     if is_tamil:
-        if intent == "detailed" and req.max_tokens is None:
-            max_tok = min(max_tok, 260)
+        if intent == "simple" and req.max_tokens is None:
+            max_tok = min(max_tok, 120)
+        elif intent == "detailed" and req.max_tokens is None:
+            max_tok = min(max_tok, 220)
         if intent == "detailed" and req.max_seconds is None:
-            max_sec = min(max_sec, 42.0)
+            max_sec = min(max_sec, 35.0)
     return max_sec, max_tok
 
 
@@ -744,6 +756,9 @@ def _submit_inference(req: ChatRequest):
     cancel_event = _begin_generation()
     out_queue: queue.Queue = queue.Queue()
 
+    if sources:
+        out_queue.put(("sources", sources))
+
     if direct_reply is not None:
         direct_intent = "simple"
         out_queue.put(("token", direct_reply))
@@ -764,7 +779,7 @@ def _submit_inference(req: ChatRequest):
 
     prompt = build_qwen_prompt(raw_messages, intent, augmented_context)
     max_seconds, max_tokens = _resolve_limits(req, intent, is_tamil=is_tamil)
-    repeat_penalty = 1.10 if is_tamil else 1.15
+    repeat_penalty = 1.18 if is_tamil else 1.15
     future = inference_executor.submit(
         _run_inference,
         prompt,
@@ -791,6 +806,10 @@ async def chat_stream(req: ChatRequest):
     async def event_generator():
         last_emit = time.monotonic()
         pending_item: tuple[str, object] | None = None
+        # Emit initial metadata event
+        meta_payload = json.dumps({"type": "meta", "model": MODEL_PATH.name, "mode": req.mode})
+        yield f"event: meta\ndata: {meta_payload}\n\n"
+
         try:
             while True:
                 if pending_item is not None:
@@ -812,7 +831,10 @@ async def chat_stream(req: ChatRequest):
 
                 last_emit = time.monotonic()
                 kind, value = item
-                if kind == "token":
+                if kind == "sources":
+                    src_payload = json.dumps({"type": "sources", "sources": value})
+                    yield f"event: sources\ndata: {src_payload}\n\n"
+                elif kind == "token":
                     # Drain consecutive token chunks in order to keep SSE frames smooth and compact.
                     token_parts = [str(value)]
                     while True:
@@ -824,14 +846,24 @@ async def chat_stream(req: ChatRequest):
                             pending_item = nxt
                             break
                         token_parts.append(str(nxt[1]))
-                    payload = json.dumps({"type": "token", "content": "".join(token_parts)})
-                    yield f"data: {payload}\n\n"
+                    chunk_text = "".join(token_parts)
+                    payload = json.dumps({"type": "token", "content": chunk_text, "text": chunk_text})
+                    yield f"event: token\ndata: {payload}\n\n"
                 elif kind == "done":
-                    done_payload = json.dumps({"type": "done", **value})
-                    yield f"data: {done_payload}\n\n"
+                    done_payload = json.dumps({
+                        "type": "done",
+                        "finishReason": "stop",
+                        "totalMs": value.get("elapsedMs", 0) if isinstance(value, dict) else 0,
+                        **(value if isinstance(value, dict) else {}),
+                    })
+                    yield f"event: done\ndata: {done_payload}\n\n"
                 elif kind == "error":
-                    err_payload = json.dumps({"type": "error", "message": value})
-                    yield f"data: {err_payload}\n\n"
+                    err_payload = json.dumps({
+                        "type": "error",
+                        "code": "GENERATION_FAILED",
+                        "message": str(value),
+                    })
+                    yield f"event: error\ndata: {err_payload}\n\n"
         except asyncio.CancelledError:
             cancel_event.set()
             raise

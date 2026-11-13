@@ -1,0 +1,23 @@
+/* Subtle blinking cursor for streaming assistant responses */
+.streaming-cursor::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: zero-cursor-blink 0.8s steps(2, start) infinite;
+}
+
+@keyframes zero-cursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-cursor::after {
+    animation: none;
+  }
+}

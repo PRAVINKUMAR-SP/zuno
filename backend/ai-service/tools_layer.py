@@ -32,14 +32,25 @@ _WEB_TRIGGER_RE = re.compile(
     r"who\s+won|(?:match|live|cricket|football|sports)\s+score|release\s+date|"
     r"newest\s+version|search\s+web|search\s+online|look\s+up\s+online|2024|2025|2026|"
     r"compare|comparison|versus|\bvs\b|difference\s+between|which\s+is\s+better|best\s+[a-z]+|"
-    r"who\s+(?:is|was|were)|history\s+of|dynasty|ruler|king|founder|founded|ceo\s+of|"
-    r"capital\s+of|population\s+of|price\s+of|where\s+is|when\s+(?:did|was|is)"
+    r"who\s+(?:is|was|were|are)|whom|history|historical|dynasty|empire|emperor|kingdom|ruler|king|queen|monarch|reign|"
+    r"chola[s]?|cholan|pandya[s]?|pandiyan|chera[s]?|cheran|pallava[s]?|mughal[s]?|maratha[s]?|maurya|gupta|"
+    r"temple|brihadisvara|thanjavur|monument|battle\s+of|war\s+of|treaty|"
+    r"founder|founded|ceo\s+of|net\s+worth|biography|born|died|"
+    r"capital\s+of|population\s+of|price\s+of|where\s+is|when\s+(?:did|was|is)|"
+    r"explain\s+about|tell\s+(?:me\s+)?about|information\s+about|details\s+about"
     r")\b"
+)
+_TAMIL_WEB_TRIGGER_RE = re.compile(
+    r"[\u0B80-\u0BFF]*(?:"
+    r"சோழ|பாண்டிய|சேர|பல்லவ|மன்னர்|அரசர்|பேரரசு|வரலாறு|கோயில்|கோவில்|தஞ்சை|பெரிய\s*கோயில்|"
+    r"யார்|எப்போது|எங்கே|எப்படி|என்ன|விளக்கு|கூறு|பற்றி|பத்தி"
+    r")[\u0B80-\u0BFF]*"
 )
 _TAMIL_ENTITY_RE = re.compile(r"[\u0B80-\u0BFF]{4,}")
 
 _SKIP_WEB_RE = re.compile(
-    r"(?i)^(?:hi|hii|hello|hey|yo|thanks|thank\s+you|ok|okay|bye|good\s+morning|who\s+are\s+you)\s*[.?!]*$"
+    r"(?i)^(?:hi|hii|hello|hey|yo|thanks|thank\s+you|ok|okay|bye|good\s+morning|"
+    r"who\s+are\s+you|about\s+you|tell\s+me\s+about\s+yourself|what\s+can\s+you\s+do|how\s+are\s+you)\s*[.?!]*$"
 )
 
 _SAFE_BIN_OPS = {
@@ -207,7 +218,11 @@ def should_search_web(query: str, use_web: bool | None) -> bool:
     clean = query.strip()
     if _SKIP_WEB_RE.match(clean) or len(clean.split()) < 2:
         return False
-    return bool(_WEB_TRIGGER_RE.search(clean) or _TAMIL_ENTITY_RE.search(clean))
+    return bool(
+        _WEB_TRIGGER_RE.search(clean)
+        or _TAMIL_WEB_TRIGGER_RE.search(clean)
+        or _TAMIL_ENTITY_RE.search(clean)
+    )
 
 
 def _decode_ddg_href(raw_href: str) -> str:
@@ -227,47 +242,127 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(text)).strip()
 
 
+def _clean_search_query(q: str) -> str:
+    cleaned = re.sub(
+        r"(?i)\b(?:please\s+)?(?:explain\s+about|tell\s+(?:me\s+)?about|information\s+about|details\s+about|who\s+(?:is|was|were|are)|what\s+is|give\s+details\s+on|in\s+tamil|in\s+english|history\s+explain|explain)\b",
+        " ",
+        q,
+    )
+    cleaned = re.sub(
+        r"[\u0B80-\u0BFF]*(?:விளக்குங்கள்|விளக்குக|விளக்கு|சொல்லுங்கள்|சொல்லு|கூறுங்கள்|கூறு|பற்றி|பத்தி|தமிழ்\s*மொழியில்)[\u0B80-\u0BFF]*",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?!.,")
+
+    is_movie = bool(re.search(r"(?i)\b(movie|film|cinema|song|actor|actress)\b|திரைப்படம்|படம்|பாடல்", q))
+    is_history_entity = bool(re.search(r"(?i)\b(chola[s]?|cholan|pandya[s]?|pandiyan|chera[s]?|pallava[s]?|dynasty|emperor|king|ruler|empire)\b|சோழ|பாண்டிய|சேர|பல்லவ|மன்னர்|அரசர்", q))
+    if is_history_entity and not is_movie:
+        if bool(re.search(r"[\u0B80-\u0BFF]", cleaned)):
+            if "வரலாறு" not in cleaned:
+                cleaned += " வரலாறு"
+        else:
+            if "history" not in cleaned.lower():
+                cleaned += " history"
+
+    return cleaned if len(cleaned) >= 3 else q
+
+
+def search_wikipedia(query: str, max_results: int = 2) -> list[dict]:
+    """Fallback encyclopedia lookup: rate-limit-free, ultra-fast factual grounding."""
+    has_tamil = bool(re.search(r"[\u0B80-\u0BFF]", query))
+    lang = "ta" if has_tamil else "en"
+    clean_q = re.sub(r"(?i)\b(?:in\s+tamil|in\s+english|tell\s+me\s+about|explain\s+about)\b", " ", query).strip()
+    if not clean_q:
+        clean_q = query
+    params = {
+        "action": "query",
+        "list": "search",
+        "srsearch": clean_q,
+        "utf8": 1,
+        "format": "json",
+        "srlimit": max_results,
+    }
+    client = _get_http_client()
+    try:
+        url = f"https://{lang}.wikipedia.org/w/api.php"
+        resp = client.get(
+            url,
+            params=params,
+            headers={"User-Agent": "ZunoAI/1.0 (contact@zuno.ai)"},
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        results: list[dict] = []
+        for item in data.get("query", {}).get("search", []):
+            clean_snip = re.sub(r"<[^>]+>", "", item.get("snippet", ""))
+            clean_snip = re.sub(r"\s+", " ", html.unescape(clean_snip)).strip()
+            title = item.get("title", "")
+            enc_title = title.replace(" ", "_")
+            results.append({
+                "title": f"{title} - Wikipedia",
+                "url": f"https://{lang}.wikipedia.org/wiki/{enc_title}",
+                "snippet": clean_snip[:150],
+            })
+            if len(results) >= max_results:
+                break
+        return results
+    except Exception:
+        return []
+
+
 def web_search(query: str, max_results: int = 2) -> list[dict]:
-    """Layer 6 (Web Search): Ultra-fast pooled DuckDuckGo search (returns in <1s)."""
-    safe_query = redact_sensitive_text(query).strip()[:180]
+    """Layer 6 (Web Search): Ultra-fast pooled DuckDuckGo search with Wikipedia fallback."""
+    refined = _clean_search_query(query)
+    safe_query = redact_sensitive_text(refined).strip()[:180]
     if not safe_query:
         return []
 
+    is_movie_intent = bool(re.search(r"(?i)\b(movie|film|cinema|song)\b|திரைப்படம்|படம்", query))
+
+    results: list[dict] = []
     client = _get_http_client()
     try:
         resp = client.post(
             "https://html.duckduckgo.com/html/",
             data={"q": safe_query},
         )
-        if resp.status_code != 200:
-            return []
+        if resp.status_code == 200:
+            page = resp.text
+            title_links = re.findall(
+                r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                page,
+                flags=re.DOTALL,
+            )
+            snippets = re.findall(
+                r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>|<div[^>]*class="result__snippet"[^>]*>(.*?)</div>',
+                page,
+                flags=re.DOTALL,
+            )
+            for idx, (href, raw_title) in enumerate(title_links):
+                title = _strip_html(raw_title)
+                url = _decode_ddg_href(href)
+                # Skip entertainment/movie hits when user asked about historical kings/dynasties
+                if not is_movie_intent and re.search(r"(?i)\b(திரைப்படம்|திரைக்கதை|film|movie)\b", title):
+                    continue
+                snip = ""
+                if idx < len(snippets):
+                    snip = _strip_html(snippets[idx][0] or snippets[idx][1])
+                if title and url:
+                    results.append({
+                        "title": title[:80],
+                        "url": url[:180],
+                        "snippet": snip[:150],
+                    })
+                    if len(results) >= max_results:
+                        break
     except Exception:
-        return []
+        pass
 
-    page = resp.text
-    title_links = re.findall(
-        r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-        page,
-        flags=re.DOTALL,
-    )
-    snippets = re.findall(
-        r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>|<div[^>]*class="result__snippet"[^>]*>(.*?)</div>',
-        page,
-        flags=re.DOTALL,
-    )
+    # If DDG was rate-limited (status 202) or returned empty, fall back to Wikipedia
+    if not results:
+        results = search_wikipedia(refined, max_results=max_results)
 
-    results: list[dict] = []
-    for idx, (href, raw_title) in enumerate(title_links[:max_results]):
-        title = _strip_html(raw_title)
-        url = _decode_ddg_href(href)
-        snip = ""
-        if idx < len(snippets):
-            snip = _strip_html(snippets[idx][0] or snippets[idx][1])
-        if title and url:
-            results.append({
-                "title": title[:80],
-                "url": url[:180],
-                "snippet": snip[:150],
-            })
     return results
 

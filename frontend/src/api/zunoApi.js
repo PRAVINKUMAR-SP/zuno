@@ -1,3 +1,5 @@
+import { createSSEParser } from '../utils/sseParser';
+
 const API_BASE = '/api';
 
 async function requestJson(path, options = {}) {
@@ -77,6 +79,7 @@ export async function streamChat({
   signal,
   onMeta,
   onToken,
+  onSources,
   onDone,
   onError,
 }) {
@@ -103,62 +106,46 @@ export async function streamChat({
   }
 
   const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
+  const decoder = new TextDecoder('utf-8');
 
-  const processBlock = (block) => {
-    const dataLines = [];
-    for (const rawLine of block.split(/\r?\n/)) {
-      if (rawLine.startsWith('data:')) {
-        dataLines.push(rawLine.slice(5).replace(/^ /, ''));
+  const parser = createSSEParser((event) => {
+    const { type, data } = event;
+    const payload = typeof data === 'object' && data !== null ? data : {};
+
+    if (type === 'meta') {
+      if (onMeta) onMeta(payload);
+    } else if (type === 'token') {
+      const text = payload.content !== undefined ? payload.content : (payload.text !== undefined ? payload.text : '');
+      if (onToken) onToken(text);
+    } else if (type === 'sources') {
+      const srcList = Array.isArray(payload.sources) ? payload.sources : (Array.isArray(payload) ? payload : []);
+      if (onSources) onSources(srcList);
+    } else if (type === 'done') {
+      if (onDone) onDone(payload);
+    } else if (type === 'error') {
+      if (onError) onError(new Error(payload.message || 'Stream error'));
+    }
+  });
+
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        await reader.cancel().catch(() => {});
+        break;
       }
+
+      const { done, value } = await reader.read();
+      if (done) {
+        parser.push(decoder.decode());
+        parser.finish();
+        break;
+      }
+
+      parser.push(decoder.decode(value, { stream: true }));
     }
-    if (dataLines.length === 0) return;
-
-    const jsonText = dataLines.join('\n').trim();
-    if (!jsonText) return;
-
-    let evt;
-    try {
-      evt = JSON.parse(jsonText);
-    } catch {
-      return;
-    }
-
-    if (evt.type === 'meta' && onMeta) onMeta(evt);
-    else if (evt.type === 'token' && onToken) onToken(evt.content || '');
-    else if (evt.type === 'done' && onDone) onDone(evt);
-    else if (evt.type === 'error' && onError) onError(new Error(evt.message || 'Stream error'));
-  };
-
-  while (true) {
+  } finally {
     if (signal?.aborted) {
       await reader.cancel().catch(() => {});
-      break;
-    }
-
-    const { done, value } = await reader.read();
-    if (done) {
-      buffer += decoder.decode();
-      break;
-    }
-
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split(/\r?\n\r?\n/);
-    buffer = events.pop() || '';
-
-    for (const block of events) {
-      if (block.trim()) {
-        processBlock(block);
-      }
-    }
-  }
-
-  if (!signal?.aborted && buffer.trim()) {
-    for (const block of buffer.split(/\r?\n\r?\n/)) {
-      if (block.trim()) {
-        processBlock(block);
-      }
     }
   }
 }

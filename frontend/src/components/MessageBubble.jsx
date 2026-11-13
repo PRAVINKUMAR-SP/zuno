@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Check, Clock, Copy, FileText } from 'lucide-react';
 import ZunoLogo from './ZunoLogo';
+import '../styles/streaming.css';
 
 function prepareStreamingMarkdown(text, isStreaming) {
   if (!isStreaming || !text) return text;
@@ -150,7 +151,7 @@ const MessageBubble = memo(function MessageBubble({ message, isStreaming }) {
       </div>
 
       <div className="min-w-0 flex-1 pt-0.5">
-        <div className="zuno-prose break-words">
+        <div className={`zuno-prose break-words ${isStreaming && message.content ? 'streaming-cursor' : ''}`}>
           {message.content ? (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
