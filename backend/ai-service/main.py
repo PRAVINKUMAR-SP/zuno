@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 import json
 import os
 import queue
@@ -27,14 +28,36 @@ N_THREADS_BATCH = int(os.getenv("ZUNO_THREADS_BATCH", "8"))
 N_CTX = int(os.getenv("ZUNO_CTX", "2048"))
 N_BATCH = int(os.getenv("ZUNO_BATCH", "256"))
 
-BASE_SYSTEM_PROMPT = (
-    "You are Zuno, an intelligent and accurate personal AI assistant. "
-    "Understand English, Tamil, and Romanized Tamil (Tanglish). "
-    "Reply in clear, natural English by default, or in accurate, grammatical Tamil script (தமிழ்) when Tamil is requested. "
-    "When explaining historical figures, dynasties, rulers, or events, provide accurate historical facts (reign, empire, architecture, achievements). "
-    "Never confuse historical names with grammar terms or linguistic concepts. "
-    "Provide factual, direct answers without repeating sentences or paragraphs, and only cite saved user facts when relevant."
-)
+
+def get_base_system_prompt() -> str:
+    now_ist = dt.datetime.now(dt.timezone(dt.timedelta(hours=5, minutes=30)))
+    today_str = now_ist.strftime("%A, %B %d, %Y")
+    return (
+        "You are Zuno (ZERO), a helpful, accurate personal AI assistant.\n\n"
+        "GENERAL BEHAVIOR:\n"
+        "1. Answer the user's actual question directly.\n"
+        "2. Use simple, natural English unless another language (e.g. Tamil) is requested.\n"
+        "3. Give short answers to simple questions; explain in detail when explicitly requested.\n"
+        "4. Understand follow-up messages using conversation history.\n"
+        "5. Never repeat the same information unnecessarily.\n\n"
+        "CURRENT INFORMATION & REAL-TIME ACCURACY:\n"
+        f"1. Today's current date is {today_str} (Year {now_ist.year}).\n"
+        "2. Never assume pretrained knowledge (cutoff July 2024) is current. Real-world offices, elections, and events change.\n"
+        "3. For current events, politicians, office holders (e.g. Chief Ministers, Prime Ministers, Governors, Presidents), political parties, election results, and news, strictly rely on provided live web results or tools.\n"
+        "4. Never state 'I cannot check the internet' or 'my knowledge is limited to July 2024' — live search tools are integrated and active.\n"
+        "5. When live web results are provided, cite and use them directly without contradiction.\n\n"
+        "USER CORRECTIONS:\n"
+        "1. Treat user corrections as factual updates that require verification, not debate.\n"
+        "2. Do NOT argue with the user using outdated pretrained knowledge.\n"
+        "3. When the user provides a correction on a changing fact (such as current office holders or election winners), verify and confirm the updated status gracefully.\n\n"
+        "DATE AND TIME:\n"
+        f"1. Always use the current year ({now_ist.year}) and system date ({today_str}).\n"
+        "2. Never guess today's date from training data.\n\n"
+        "UNCERTAINTY & CONVERSATION:\n"
+        "1. Never invent facts or confuse historical names with grammar terms.\n"
+        "2. Understand abbreviations and common entity names (e.g. TVK = Tamilaga Vettri Kazhagam, CM = Chief Minister).\n"
+        "3. Use previous messages to understand ambiguous references."
+    )
 
 INTENT_SETTINGS = {
     "greeting": {
@@ -249,8 +272,8 @@ def build_qwen_prompt(
         for m in messages
         if m.get("role") == "system" and m.get("content", "").strip()
     ]
-    # Keep BASE_SYSTEM_PROMPT + memory facts + style at the front so KV prefix cache stays warm across turns.
-    system_prompt = "\n".join([BASE_SYSTEM_PROMPT, *extra_system, f"Response guide: {settings['style']}"])
+    # Keep base system instructions + dynamic date + style at the front.
+    system_prompt = "\n".join([get_base_system_prompt(), *extra_system, f"Response guide: {settings['style']}"])
     parts = [f"<|im_start|>system\n{system_prompt}<|im_end|>\n"]
     trimmed = trim_conversation(messages)
     followup_hint = _followup_instruction(messages)
@@ -696,8 +719,19 @@ def _prepare_turn_context(
             [],
         )
 
+    _META_SEARCH_CMD_RE = re.compile(
+        r"(?i)^(?:please\s+)?(?:check\s+online|search\s+online|check\s+(?:the\s+)?(?:web|internet)|search\s+google|google\s+it|look\s+(?:it\s+)?up|verify(?:\s+online)?|check\s+again|check\s+it)\s*[.?!]*$"
+    )
+    is_meta_search = bool(_META_SEARCH_CMD_RE.match(safe_user))
+
     retrieval_query = safe_user
-    if len(safe_user.split()) <= 6 and len(user_msgs) >= 2:
+    if is_meta_search:
+        # User commanded "check online": ground search in the preceding conversation topic
+        if len(user_msgs) >= 3:
+            retrieval_query = f"{user_msgs[-3]} {user_msgs[-2]}"
+        elif len(user_msgs) >= 2:
+            retrieval_query = user_msgs[-2]
+    elif len(safe_user.split()) <= 6 and len(user_msgs) >= 2:
         retrieval_query = f"{user_msgs[-2]} {safe_user}"
 
     augmented_context: list[str] = []
@@ -720,22 +754,33 @@ def _prepare_turn_context(
             + "\n".join(lines)
         )
 
-    explicit_web_words = bool(re.search(r"(?i)\b(search\s+web|search\s+online|look\s+up\s+online)\b", safe_user))
-    run_web = (use_web is True) or (use_web is None and tools_layer.should_search_web(safe_user, None) and (not doc_hits or explicit_web_words))
+    explicit_web_words = bool(
+        is_meta_search
+        or re.search(r"(?i)\b(search\s+web|search\s+online|look\s+up\s+online|check\s+online|check\s+internet)\b", safe_user)
+    )
+    run_web = (use_web is True) or is_meta_search or (
+        use_web is None
+        and (tools_layer.should_search_web(safe_user, None) or tools_layer.should_search_web(retrieval_query, None))
+        and (not doc_hits or explicit_web_words)
+    )
     if run_web:
         web_hits = tools_layer.web_search(retrieval_query)
         if web_hits:
             tools_used.append("web")
             web_lines = []
             for item in web_hits:
-                web_lines.append(f"- {item['title']}: {item['snippet'][:130]}")
+                web_lines.append(f"- {item['title']}: {item['snippet'][:140]}")
                 key = ("web", item["title"])
                 if key not in seen_sources:
                     seen_sources.add(key)
                     sources.append({"kind": "web", "title": item["title"], "url": item["url"]})
             augmented_context.append(
-                "Web search results (use for current facts and cite source names when helpful):\n"
+                "LIVE VERIFIED WEB RESULTS (Retrieved online November 2026):\n"
                 + "\n".join(web_lines)
+                + "\n\nCRITICAL INSTRUCTION FOR CURRENT FACTS:\n"
+                + "- Use these verified current facts. Never contradict them with outdated pre-2024 training data.\n"
+                + "- If the user made a statement or correction (e.g. current Chief Minister or office holder), verify it against these facts and confirm the updated status.\n"
+                + "- Cite source titles in your answer and never say you cannot access the internet."
             )
 
     return None, augmented_context, tools_used, sources

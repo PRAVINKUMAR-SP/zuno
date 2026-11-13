@@ -139,10 +139,56 @@ def test_stream_abort_and_recovery():
     print(f"  PASS: Server healthy and receptive immediately after abort ({time.time() - t1:.2f}s)")
 
 
+def test_current_date_clock_tool():
+    print("[TEST 6] Testing deterministic current date clock tool ('today what day')...")
+    events = _read_sse_events(
+        f"{BASE_URL}/v1/chat/stream",
+        {"messages": [{"role": "user", "content": "today what day"}], "mode": "auto"},
+        max_read_seconds=10.0,
+    )
+    tokens = [e["data"].get("content", "") or e["data"].get("text", "") for e in events if e["event"] == "token"]
+    full_text = "".join(tokens)
+    print(f"  Clock tool response: {full_text!r}")
+    # Verify exact day and year without hallucinating 2024
+    assert "2026" in full_text or "Friday" in full_text, f"Expected 2026/Friday, got: {full_text}"
+    assert "2024" not in full_text, f"Date hallucinated old 2024 year: {full_text}"
+    print("  PASS: Current date answered instantly and accurately by clock tool")
+
+
+def test_meta_search_command_check_online():
+    print("[TEST 7] Testing contextual 'check online' command...")
+    messages = [
+        {"role": "user", "content": "Tell TamilNadu CM"},
+        {"role": "assistant", "content": "The Chief Minister of Tamil Nadu is M. K. Stalin."},
+        {"role": "user", "content": "no the curent cm is vijay"},
+        {"role": "assistant", "content": "The current Chief Minister is M. K. Stalin."},
+        {"role": "user", "content": "check online"}
+    ]
+    events = _read_sse_events(
+        f"{BASE_URL}/v1/chat/stream",
+        {"messages": messages, "mode": "auto"},
+        max_read_seconds=45.0,
+    )
+    tokens = [e["data"].get("content", "") or e["data"].get("text", "") for e in events if e["event"] == "token"]
+    full_text = "".join(tokens)
+    print(f"  'check online' response sample: {full_text[:120]}...")
+
+    # Must NOT claim cannot check internet
+    assert "cannot check the internet" not in full_text.lower(), (
+        f"Model wrongly claimed cannot check internet: {full_text}"
+    )
+    assert "july 2024" not in full_text.lower(), (
+        f"Model claimed knowledge limited to July 2024: {full_text}"
+    )
+    print("  PASS: 'check online' activated live verification without canned refusal")
+
+
 if __name__ == "__main__":
     test_health()
     test_greeting_stream()
     test_web_auto_historical_query()
     test_language_leak_prevention()
     test_stream_abort_and_recovery()
+    test_current_date_clock_tool()
+    test_meta_search_command_check_online()
     print("\nALL REGRESSION TESTS PASSED SUCCESSFULLY!")

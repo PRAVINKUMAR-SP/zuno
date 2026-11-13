@@ -28,16 +28,24 @@ _UNSAFE_PATTERNS = (
 
 _WEB_TRIGGER_RE = re.compile(
     r"(?i)\b("
-    r"latest|today|current|news|weather|stock\s+price|exchange\s+rate|"
+    r"latest|today|current|curent|news|weather|stock\s+price|exchange\s+rate|"
     r"who\s+won|(?:match|live|cricket|football|sports)\s+score|release\s+date|"
-    r"newest\s+version|search\s+web|search\s+online|look\s+up\s+online|2024|2025|2026|"
+    r"newest\s+version|search\s+web|search\s+online|search\s+google|google\s+it|"
+    r"check\s+online|check\s+(?:the\s+)?internet|check\s+(?:the\s+)?web|look\s+(?:it\s+)?up|verify(?:\s+online)?|check\s+again|check\s+it|2024|2025|2026|"
     r"compare|comparison|versus|\bvs\b|difference\s+between|which\s+is\s+better|best\s+[a-z]+|"
     r"who\s+(?:is|was|were|are)|whom|history|historical|dynasty|empire|emperor|kingdom|ruler|king|queen|monarch|reign|"
     r"chola[s]?|cholan|pandya[s]?|pandiyan|chera[s]?|cheran|pallava[s]?|mughal[s]?|maratha[s]?|maurya|gupta|"
     r"temple|brihadisvara|thanjavur|monument|battle\s+of|war\s+of|treaty|"
     r"founder|founded|ceo\s+of|net\s+worth|biography|born|died|"
     r"capital\s+of|population\s+of|price\s+of|where\s+is|when\s+(?:did|was|is)|"
-    r"explain\s+about|tell\s+(?:me\s+)?about|information\s+about|details\s+about"
+    r"explain\s+about|tell\s+(?:me\s+)?about|information\s+about|details\s+about|"
+    r"(?:cm|chief\s+minister|pm|prime\s+minister|governor|president|minister|mla|mp|mayor)\b|"
+    r"tamil\s*nadu\s+cm|tn\s+cm|current\s+cm|curent\s+cm|tell\s+cm|"
+    r"(?:tvk|tamilaga\s+vettri\s+kazhagam|dmk|aiadmk|bjp|congress|aap)\b|"
+    r"(?:vijay|stalin|modi|rahul)\b|"
+    r"no\s+the\s+(?:current|curent)|the\s+(?:current|curent)\s+[a-z]+\s+is|"
+    r"election|sworn\s+in|oath|"
+    r"(?:you\s+know|do\s+you\s+know)\s+[a-z0-9]+"
     r")\b"
 )
 _TAMIL_WEB_TRIGGER_RE = re.compile(
@@ -153,21 +161,60 @@ def _extract_math_expression(text: str) -> str | None:
     return expr
 
 
+_DATE_TIME_QUERY_RE = re.compile(
+    r"(?i)^("
+    r"(?:what\s+is\s+)?today(?:'s)?\s+(?:day|date|time)|"
+    r"today\s+what\s+(?:day|date|time)|"
+    r"what\s+(?:day|date|time)\s+(?:is\s+)?today|"
+    r"what\s+day\s+is\s+it|"
+    r"which\s+day\s+is\s+today|"
+    r"day\s+today|date\s+today|time\s+now|current\s+(?:date|day|time|year)|"
+    r"what\s+is\s+the\s+date|what\s+is\s+the\s+time|what\s+is\s+the\s+day|"
+    r"what\s+date\s+is\s+today|"
+    r"what\s+year\s+is\s+(?:it|this)|current\s+year|which\s+year|"
+    r"what\s+time\s+is\s+it|"
+    r"today(?:'s)?\s+date\s+and\s+time|date\s+and\s+time|"
+    r"inniku\s+(?:enna\s+)?(?:naal|date|day)|innaiku\s+(?:enna\s+)?(?:naal|date)|"
+    r"இன்று\s+என்ன\s+நாள்|இன்றைய\s+தேதி|இன்றைய\s+நாள்"
+    r")\s*[.?!]*$"
+)
+
+
+def get_current_datetime_info() -> dict[str, str]:
+    tz_ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    now = dt.datetime.now(tz_ist)
+    return {
+        "day": now.strftime("%A"),
+        "date": now.strftime("%B %d, %Y"),
+        "time": now.strftime("%I:%M %p"),
+        "year": str(now.year),
+        "iso": now.strftime("%Y-%m-%d"),
+        "formatted": now.strftime("%A, %B %d, %Y at %I:%M %p IST"),
+    }
+
+
 def try_run_local_tool(query: str) -> dict | None:
     """Layer 7 (Tool Calling): Execute safe deterministic calculator and date/time tools."""
     q_norm = re.sub(r"\s+", " ", query.lower()).strip(" ?!.")
 
-    if q_norm in {
+    if _DATE_TIME_QUERY_RE.match(q_norm) or q_norm in {
         "what is today's date", "what is todays date", "today's date", "todays date",
-        "current date", "what date is today", "what day is today",
-        "what time is it", "current time", "what is the time", "date and time",
+        "current date", "what date is today", "what day is today", "today what day",
+        "what time is it", "current time", "what is the time", "date and time", "time now",
     }:
-        now = dt.datetime.now()
-        formatted = now.strftime("%A, %B %d, %Y at %I:%M %p")
+        dt_info = get_current_datetime_info()
+        if re.search(r"(?i)\bday\b", q_norm) and not re.search(r"(?i)\bdate\b", q_norm):
+            reply = f"Today is **{dt_info['day']}**, {dt_info['date']}."
+        elif re.search(r"(?i)\btime\b", q_norm):
+            reply = f"The current time is **{dt_info['time']}** IST ({dt_info['day']}, {dt_info['date']})."
+        elif re.search(r"(?i)\byear\b", q_norm):
+            reply = f"The current year is **{dt_info['year']}** (today is {dt_info['day']}, {dt_info['date']})."
+        else:
+            reply = f"Today's date is **{dt_info['date']}** ({dt_info['day']}) and the time is **{dt_info['time']}** IST."
         return {
             "tool": "clock",
-            "result": formatted,
-            "direct_reply": f"Current local date and time: **{formatted}**.",
+            "result": dt_info["formatted"],
+            "direct_reply": reply,
         }
 
     expr = _extract_math_expression(query)
@@ -244,7 +291,7 @@ def _strip_html(raw: str) -> str:
 
 def _clean_search_query(q: str) -> str:
     cleaned = re.sub(
-        r"(?i)\b(?:please\s+)?(?:explain\s+about|tell\s+(?:me\s+)?about|information\s+about|details\s+about|who\s+(?:is|was|were|are)|what\s+is|give\s+details\s+on|in\s+tamil|in\s+english|history\s+explain|explain)\b",
+        r"(?i)\b(?:please\s+)?(?:check\s+online|search\s+online|check\s+(?:the\s+)?internet|check\s+(?:the\s+)?web|search\s+google|google\s+it|look\s+(?:it\s+)?up|verify(?:\s+online)?|check\s+it|explain\s+about|tell\s+(?:me\s+)?about|information\s+about|details\s+about|who\s+(?:is|was|were|are)|what\s+is|give\s+details\s+on|in\s+tamil|in\s+english|history\s+explain|explain|you\s+know|do\s+you\s+know)\b",
         " ",
         q,
     )
@@ -253,6 +300,13 @@ def _clean_search_query(q: str) -> str:
         " ",
         cleaned,
     )
+    # Strip leading negative or conversational words like "no the"
+    cleaned = re.sub(r"(?i)^(?:no\s+)?(?:the\s+)?", " ", cleaned.strip())
+    # Expand abbreviations and correct common typos
+    cleaned = re.sub(r"(?i)\bcurent\b", "current", cleaned)
+    cleaned = re.sub(r"(?i)\bcm\b", "Chief Minister", cleaned)
+    cleaned = re.sub(r"(?i)\bpm\b", "Prime Minister", cleaned)
+    cleaned = re.sub(r"(?i)\btvk\b", "TVK Tamilaga Vettri Kazhagam", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ?!.,")
 
     is_movie = bool(re.search(r"(?i)\b(movie|film|cinema|song|actor|actress)\b|திரைப்படம்|படம்|பாடல்", q))
