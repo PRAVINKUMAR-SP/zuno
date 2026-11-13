@@ -1,37 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { isSpeechRecognitionSupported } from '../utils/speechUtils';
+
+export const SUPPORTED_LANGUAGES = [
+  { code: 'en-IN', label: 'English', short: 'EN' },
+  { code: 'ta-IN', label: 'தமிழ்', short: 'தமிழ்' },
+];
+
+export function isSpeechRecognitionSupported() {
+  if (typeof window === 'undefined') return false;
+  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
 
 export function useVoiceInput({
   defaultLang = 'en-IN',
   onTranscriptChange,
-  onSpeechEnd,
 } = {}) {
   const [isListening, setIsListening] = useState(false);
   const [lang, setLang] = useState(defaultLang);
   const [error, setError] = useState(null);
-  const [interimTranscript, setInterimTranscript] = useState('');
 
   const recognitionRef = useRef(null);
+  const baseTextRef = useRef('');
   const isManuallyStoppedRef = useRef(false);
-  const finalTranscriptRef = useRef('');
-  const timeoutRef = useRef(null);
 
   const supported = isSpeechRecognitionSupported();
-
-  const cleanupRecognition = useCallback(() => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.abort();
-      } catch {
-        // Ignore abort errors
-      }
-      recognitionRef.current = null;
-    }
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-  }, []);
 
   const stopListening = useCallback(() => {
     isManuallyStoppedRef.current = true;
@@ -41,30 +32,31 @@ export function useVoiceInput({
       } catch {
         // Ignore stop errors
       }
+      recognitionRef.current = null;
     }
     setIsListening(false);
-    setInterimTranscript('');
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    if (finalTranscriptRef.current && onSpeechEnd) {
-      onSpeechEnd(finalTranscriptRef.current.trim());
-    }
-  }, [onSpeechEnd]);
+  }, []);
 
   const startListening = useCallback(
-    (initialText = '') => {
+    (existingInputText = '') => {
       if (!supported) {
         setError('Voice input is not supported in this browser. Please use Chrome, Edge, or Safari.');
         return;
       }
 
-      cleanupRecognition();
+      // Stop any existing instance
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          // Ignore
+        }
+        recognitionRef.current = null;
+      }
+
       setError(null);
       isManuallyStoppedRef.current = false;
-      finalTranscriptRef.current = initialText ? initialText.trim() + ' ' : '';
-      setInterimTranscript('');
+      baseTextRef.current = existingInputText ? existingInputText.trim() : '';
 
       const SpeechRecognition =
         window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -83,46 +75,33 @@ export function useVoiceInput({
       };
 
       recognition.onresult = (event) => {
-        let currentInterim = '';
-        let newlyFinal = '';
+        let sessionFinal = '';
+        let sessionInterim = '';
 
-        for (let i = event.resultIndex; i < event.results.length; i++) {
+        for (let i = 0; i < event.results.length; i++) {
           const item = event.results[i];
-          const transcriptPiece = item[0]?.transcript || '';
+          const textPiece = item[0]?.transcript || '';
           if (item.isFinal) {
-            newlyFinal += transcriptPiece;
+            sessionFinal += textPiece;
           } else {
-            currentInterim += transcriptPiece;
+            sessionInterim += textPiece;
           }
         }
 
-        if (newlyFinal) {
-          finalTranscriptRef.current += newlyFinal;
-        }
+        const basePrefix = baseTextRef.current;
+        const currentSpoken = (sessionFinal + (sessionInterim ? ' ' + sessionInterim : '')).trim();
+        const fullPrompt = basePrefix
+          ? `${basePrefix} ${currentSpoken}`
+          : currentSpoken;
 
-        setInterimTranscript(currentInterim);
-
-        const combinedText = (finalTranscriptRef.current + currentInterim).trim();
-        if (onTranscriptChange) {
-          onTranscriptChange(combinedText);
+        if (onTranscriptChange && currentSpoken) {
+          onTranscriptChange(fullPrompt);
         }
-
-        // Reset silence timer: if user speaks and pauses for 3.5s, signal speech pause
-        if (timeoutRef.current) {
-          clearTimeout(timeoutRef.current);
-        }
-        timeoutRef.current = setTimeout(() => {
-          if (!isManuallyStoppedRef.current && finalTranscriptRef.current) {
-            // Silence detected after speech
-            setInterimTranscript('');
-          }
-        }, 3500);
       };
 
       recognition.onerror = (event) => {
         const errType = event.error;
         if (errType === 'no-speech') {
-          // Normal silence, don't show alarming error
           return;
         }
         if (errType === 'not-allowed') {
@@ -130,7 +109,7 @@ export function useVoiceInput({
         } else if (errType === 'audio-capture') {
           setError('No microphone found on your device.');
         } else if (errType === 'network') {
-          setError('Voice recognition network connection error.');
+          setError('Voice recognition network error.');
         } else {
           setError(`Voice input error: ${errType}`);
         }
@@ -138,17 +117,15 @@ export function useVoiceInput({
       };
 
       recognition.onend = () => {
-        // If not explicitly stopped by the user, and no fatal error, restart to keep continuous listening
         if (!isManuallyStoppedRef.current && recognitionRef.current === recognition) {
           try {
             recognition.start();
             return;
           } catch {
-            // Fall through to end
+            // End
           }
         }
         setIsListening(false);
-        setInterimTranscript('');
       };
 
       try {
@@ -158,7 +135,7 @@ export function useVoiceInput({
         setIsListening(false);
       }
     },
-    [supported, cleanupRecognition, lang, onTranscriptChange, onSpeechEnd]
+    [supported, lang, onTranscriptChange]
   );
 
   const toggleListening = useCallback(
@@ -172,17 +149,17 @@ export function useVoiceInput({
     [isListening, startListening, stopListening]
   );
 
-  const resetTranscript = useCallback(() => {
-    finalTranscriptRef.current = '';
-    setInterimTranscript('');
-  }, []);
-
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      cleanupRecognition();
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          // Ignore
+        }
+      }
     };
-  }, [cleanupRecognition]);
+  }, []);
 
   return {
     isListening,
@@ -190,10 +167,8 @@ export function useVoiceInput({
     lang,
     setLang,
     error,
-    interimTranscript,
     startListening,
     stopListening,
     toggleListening,
-    resetTranscript,
   };
 }

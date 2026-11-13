@@ -1,9 +1,8 @@
-import { memo, useEffect, useState } from 'react';
+import { memo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Check, Clock, Copy, FileText, Volume2, VolumeX } from 'lucide-react';
+import { Check, Clock, Copy, FileText } from 'lucide-react';
 import ZunoLogo from './ZunoLogo';
-import { isSpeechSynthesisSupported, speakText, stopSpeaking } from '../utils/speechUtils';
 import '../styles/streaming.css';
 
 function prepareStreamingMarkdown(text, isStreaming) {
@@ -103,32 +102,7 @@ function toPlainCopyText(markdown) {
 
 const MessageBubble = memo(function MessageBubble({ message, isStreaming }) {
   const [copiedMsg, setCopiedMsg] = useState(false);
-  const [isSpeakingThis, setIsSpeakingThis] = useState(false);
   const isUser = message.role === 'user';
-  const hasTTS = isSpeechSynthesisSupported();
-
-  useEffect(() => {
-    return () => {
-      if (isSpeakingThis) {
-        stopSpeaking();
-      }
-    };
-  }, [isSpeakingThis]);
-
-  const toggleSpeech = () => {
-    if (isSpeakingThis) {
-      stopSpeaking();
-      setIsSpeakingThis(false);
-    } else {
-      speakText(
-        message.content,
-        'en-IN',
-        () => setIsSpeakingThis(true),
-        () => setIsSpeakingThis(false),
-        () => setIsSpeakingThis(false)
-      );
-    }
-  };
 
   const elapsedSec =
     typeof message.responseTimeMs === 'number' && message.responseTimeMs > 0
@@ -225,26 +199,6 @@ const MessageBubble = memo(function MessageBubble({ message, isStreaming }) {
               )}
               <span>{copiedMsg ? 'Copied' : 'Copy'}</span>
             </button>
-
-            {hasTTS && (
-              <button
-                type="button"
-                onClick={toggleSpeech}
-                className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 transition ${
-                  isSpeakingThis
-                    ? 'bg-emerald-500/15 text-emerald-300'
-                    : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200'
-                }`}
-                title={isSpeakingThis ? 'Stop speaking' : 'Read response aloud'}
-              >
-                {isSpeakingThis ? (
-                  <VolumeX className="h-3 w-3 text-emerald-400" />
-                ) : (
-                  <Volume2 className="h-3 w-3" />
-                )}
-                <span>{isSpeakingThis ? 'Stop' : 'Listen'}</span>
-              </button>
-            )}
 
             {firstTokenSec && (
               <span

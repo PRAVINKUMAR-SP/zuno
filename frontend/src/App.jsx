@@ -17,8 +17,7 @@ import Sidebar from './components/Sidebar';
 import MessageBubble from './components/MessageBubble';
 import ZunoLogo from './components/ZunoLogo';
 import { useChatStream } from './hooks/useChatStream';
-import { useVoiceInput } from './hooks/useVoiceInput';
-import { SUPPORTED_LANGUAGES } from './utils/speechUtils';
+import { useVoiceInput, SUPPORTED_LANGUAGES } from './hooks/useVoiceInput';
 import {
   deleteConversation,
   deleteDoc,
@@ -324,26 +323,6 @@ export default function App() {
               </div>
             )}
 
-            {isListening && (
-              <div className="mb-2 flex items-center justify-between rounded-xl border border-red-500/25 bg-red-500/10 px-3.5 py-1.5 text-xs text-red-200 shadow-sm animate-fadeIn">
-                <div className="flex items-center gap-2">
-                  <span className="relative flex h-2 w-2">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
-                  </span>
-                  <span className="font-medium">
-                    Listening ({SUPPORTED_LANGUAGES.find((l) => l.code === voiceLang)?.short || 'Voice'})... speak now
-                  </span>
-                </div>
-                <div className="flex items-center gap-1 h-3.5">
-                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-400" style={{ animationDelay: '0ms' }} />
-                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-300" style={{ animationDelay: '150ms' }} />
-                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-400" style={{ animationDelay: '300ms' }} />
-                  <span className="zuno-audio-bar inline-block w-1 rounded-full bg-red-300" style={{ animationDelay: '450ms' }} />
-                </div>
-              </div>
-            )}
-
             <div className="rounded-[22px] border border-white/[0.11] bg-[#15161d] px-4 pt-3 pb-2.5 shadow-[0_8px_30px_rgba(0,0,0,0.45)] transition focus-within:border-white/25">
               <textarea
                 ref={textareaRef}
@@ -351,7 +330,7 @@ export default function App() {
                 value={input}
                 onChange={handleInputResize}
                 onKeyDown={handleKeyDown}
-                placeholder="Ask Zuno anything..."
+                placeholder={isListening ? `Listening (${SUPPORTED_LANGUAGES.find((l) => l.code === voiceLang)?.short || 'Voice'})... speak now...` : 'Ask Zuno anything...'}
                 className="max-h-44 w-full resize-none bg-transparent text-[15px] leading-relaxed text-zinc-100 placeholder-zinc-500 outline-none"
               />
 
