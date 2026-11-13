@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 import llm_client
 import rag_store
 import tools_layer
+from config.settings import CONTEXT_SIZE
+from context.manager import build_context
 
 load_dotenv()
 
@@ -611,7 +613,7 @@ def _prepare_turn_context(
     doc_ids: list[str] | None = None,
     intent: str = "simple",
     is_tamil: bool = False,
-) -> tuple[str | None, list[str], list[str], list[dict]]:
+) -> tuple[str | None, list[str], list[dict], list[dict], list[dict]]:
     """Run Safety, Tool Calling, Document RAG, and Web Search layers before generation."""
     user_msgs = [m.get("content", "").strip() for m in raw_messages if m.get("role") == "user" and m.get("content", "").strip()]
     last_user = user_msgs[-1] if user_msgs else ""
@@ -619,24 +621,25 @@ def _prepare_turn_context(
 
     refusal = tools_layer.check_unsafe_request(safe_user)
     if refusal:
-        return refusal, [], ["safety"], []
+        return refusal, ["safety"], [], [], []
 
     tool_hit = tools_layer.try_run_local_tool(safe_user)
     if tool_hit:
-        return tool_hit["direct_reply"], [], [tool_hit["tool"]], []
+        return tool_hit["direct_reply"], [tool_hit["tool"]], [], [], []
 
     if _EXPLICIT_READ_FILE_RE.match(safe_user):
         preview = rag_store.read_doc_preview(safe_user, doc_ids=doc_ids)
         if preview is None:
             return (
                 "No document is attached in this chat yet. Click **Attach doc** below to upload a PDF, text, or code file.",
-                [],
                 ["rag"],
+                [],
+                [],
                 [],
             )
         suffix = "\n\n*(Showing opening extract; ask a specific question or say \"summarize the file\" for more.)*" if preview["truncated"] else ""
         reply = f"**{preview['name']}** ({preview['totalChars']} chars):\n\n{preview['text']}{suffix}"
-        return reply, [], ["rag"], [{"kind": "doc", "title": preview["name"]}]
+        return reply, ["rag"], [{"kind": "doc", "title": preview["name"]}], [], []
 
     if _VAGUE_WRITE_FILE_RE.match(safe_user):
         all_docs = rag_store.list_docs()
@@ -645,14 +648,16 @@ def _prepare_turn_context(
             doc_name = docs[-1]["name"]
             return (
                 f"For safety, Zuno doesn't overwrite files on your disk directly — **but I can draft or rewrite `{doc_name}` right here in chat for you to copy.** Tell me what you want written (for example: *\"rewrite {doc_name} as a clean summary\"* or *\"draft a cover letter from {doc_name}\"*).",
-                [],
                 ["safety"],
                 [{"kind": "doc", "title": doc_name}],
+                [],
+                [],
             )
         return (
             "For safety, Zuno doesn't write files to disk directly — tell me the filename or content you need and I will draft the full text or code here for you to copy.",
-            [],
             ["safety"],
+            [],
+            [],
             [],
         )
 
@@ -671,25 +676,7 @@ def _prepare_turn_context(
     elif len(safe_user.split()) <= 6 and len(user_msgs) >= 2:
         retrieval_query = f"{user_msgs[-2]} {safe_user}"
 
-    augmented_context: list[str] = []
-    tools_used: list[str] = []
-    sources: list[dict] = []
-    seen_sources: set[tuple[str, str]] = set()
-
-    doc_hits = rag_store.search_docs(retrieval_query, doc_ids=doc_ids)
-    if doc_hits:
-        tools_used.append("rag")
-        lines = []
-        for hit in doc_hits:
-            lines.append(f"[{hit['name']}] {hit['snippet']}")
-            key = ("doc", hit["name"])
-            if key not in seen_sources:
-                seen_sources.add(key)
-                sources.append({"kind": "doc", "title": hit["name"]})
-        augmented_context.append(
-            "Attached document context (you ALREADY read this uploaded file; answer directly from it and never say you cannot read files):\n"
-            + "\n".join(lines)
-        )
+    doc_hits = rag_store.search_docs(retrieval_query, doc_ids=doc_ids) or []
 
     explicit_web_words = bool(
         is_meta_search
@@ -700,34 +687,9 @@ def _prepare_turn_context(
         and (tools_layer.should_search_web(safe_user, None) or tools_layer.should_search_web(retrieval_query, None))
         and (not doc_hits or explicit_web_words)
     )
-    if run_web:
-        web_hits = tools_layer.web_search(retrieval_query)
-        if web_hits:
-            tools_used.append("web")
-            web_lines = []
-            for item in web_hits:
-                web_lines.append(f"- {item['title']}: {item['snippet'][:140]}")
-                key = ("web", item["title"])
-                if key not in seen_sources:
-                    seen_sources.add(key)
-                    sources.append({"kind": "web", "title": item["title"], "url": item["url"]})
-            if is_tamil:
-                augmented_context.append(
-                    "நேரலை உண்மைத் தகவல்கள் (Verified Facts):\n"
-                    + "\n".join(web_lines)
-                    + "\n\nவிதிகள்: மேலே உள்ள உண்மைத் தகவல்களின் அடிப்படையில் எளிய, சரியான தமிழ் வாக்கியங்களில் பதில் அளியுங்கள். இலக்கணம் அல்லது சோளம் போன்ற தொடர்பற்ற சொற்களுடன் குழப்ப வேண்டாம்."
-                )
-            else:
-                augmented_context.append(
-                    "LIVE VERIFIED WEB RESULTS (Retrieved online November 2026):\n"
-                    + "\n".join(web_lines)
-                    + "\n\nCRITICAL INSTRUCTION FOR CURRENT FACTS:\n"
-                    + "- Use these verified current facts. Never contradict them with outdated pre-2024 training data.\n"
-                    + "- If the user made a statement or correction (e.g. current Chief Minister or office holder), verify it against these facts and confirm the updated status.\n"
-                    + "- Cite source titles in your answer and never say you cannot access the internet."
-                )
+    web_hits = tools_layer.web_search(retrieval_query) if run_web else []
 
-    return None, augmented_context, tools_used, sources
+    return None, [], [], doc_hits, web_hits
 
 
 class _CompletedFuture:
@@ -739,14 +701,11 @@ def _submit_inference(req: ChatRequest):
     raw_messages = [m.model_dump() for m in req.messages]
     intent = classify_question(raw_messages, req.mode)
     is_tamil = _is_tamil_turn(raw_messages)
-    direct_reply, augmented_context, tools_used, sources = _prepare_turn_context(
+    direct_reply, direct_tools, direct_sources, doc_hits, web_hits = _prepare_turn_context(
         raw_messages, req.use_web, req.doc_ids, intent=intent, is_tamil=is_tamil
     )
     cancel_event = _begin_generation()
     out_queue: queue.Queue = queue.Queue()
-
-    if sources:
-        out_queue.put(("sources", sources))
 
     if direct_reply is not None:
         direct_intent = "simple"
@@ -759,22 +718,48 @@ def _submit_inference(req: ChatRequest):
                 "firstTokenMs": 15,
                 "truncated": False,
                 "intent": direct_intent,
-                "toolsUsed": tools_used,
-                "sources": sources,
+                "toolsUsed": direct_tools,
+                "sources": direct_sources,
             },
         ))
         out_queue.put(None)
         return _CompletedFuture(), out_queue, cancel_event
 
-    prompt = build_qwen_prompt(raw_messages, intent, augmented_context, is_tamil=is_tamil)
-    max_seconds, max_tokens = _resolve_limits(req, intent, is_tamil=is_tamil)
+    user_msgs = [m.get("content", "").strip() for m in raw_messages if m.get("role") == "user" and m.get("content", "").strip()]
+    if not user_msgs:
+        raise HTTPException(status_code=400, detail="No user message provided")
+    current_question = user_msgs[-1]
+    history_msgs = raw_messages[:-1]
+
+    # Dynamic token-aware context manager enforcement
+    try:
+        prompt, max_output_tokens, sources, tools_used, stats = build_context(
+            system_prompt=get_base_system_prompt(is_tamil=is_tamil),
+            current_question=current_question,
+            conversation_history=history_msgs,
+            intent=intent,
+            is_tamil=is_tamil,
+            rag_documents=doc_hits,
+            web_results=web_hits,
+            followup_hint=_followup_instruction(raw_messages),
+            language_hint=_language_instruction(raw_messages),
+            context_size=CONTEXT_SIZE,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if sources:
+        out_queue.put(("sources", sources))
+
+    effective_output_tokens = min(req.max_tokens, max_output_tokens) if req.max_tokens is not None else max_output_tokens
+    max_seconds = req.max_seconds if req.max_seconds is not None else float(get_response_settings(intent)["max_seconds"])
     repeat_penalty = 1.18 if is_tamil else 1.15
     future = inference_executor.submit(
         _run_inference,
         prompt,
         intent,
         max_seconds,
-        max_tokens,
+        effective_output_tokens,
         req.temperature,
         repeat_penalty,
         out_queue,

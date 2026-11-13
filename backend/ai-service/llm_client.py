@@ -148,3 +148,4 @@ def generate_completion(
         raise RuntimeError(f"Remote LLM returned HTTP {resp.status_code}: {resp.text}")
     data = resp.json()
     return data["choices"][0].get("text", "")
+
