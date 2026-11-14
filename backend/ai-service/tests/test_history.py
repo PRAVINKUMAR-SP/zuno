@@ -57,3 +57,4 @@ def test_select_history_zero_budget():
     msgs = [{"role": "user", "content": "Hello"}]
     kept = select_history(msgs, max_tokens=0, count_tokens_fn=count_tokens)
     assert kept == []
+

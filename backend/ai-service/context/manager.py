@@ -226,3 +226,4 @@ def build_context(
     )
 
     return formatted_prompt, max_output, sources, tools_used, stats
+

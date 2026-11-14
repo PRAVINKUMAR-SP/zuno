@@ -10,7 +10,7 @@ from typing import Generator
 
 import httpx
 
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.194.51.83:8000").rstrip("/")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.32.13.83:8000").rstrip("/")
 LLM_MODEL = os.getenv("LLM_MODEL", "/home/opffarmy/ZERO/models/Qwen3-4B-Q4_K_M.gguf")
 CONNECT_TIMEOUT = float(os.getenv("LLM_CONNECT_TIMEOUT", "6.0"))
 READ_TIMEOUT = float(os.getenv("LLM_READ_TIMEOUT", "60.0"))
@@ -35,39 +35,75 @@ def get_llm_client() -> httpx.Client:
         return _client
 
 
+_health_cache = {"data": None, "ts": 0.0}
+
 def check_server_health() -> dict:
     """Check connectivity to remote llama-server and list loaded model."""
+    now = time.time()
+    if _health_cache["data"] and (now - _health_cache["ts"] < 3.0):
+        return _health_cache["data"]
+
+    # Fast TCP probe first (0.3s) to avoid HTTP timeouts when port 8000 is down
+    try:
+        from urllib.parse import urlparse
+        import socket
+        parsed = urlparse(LLM_BASE_URL)
+        host = parsed.hostname or "10.32.13.83"
+        port = parsed.port or 8000
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
+            s.connect((host, port))
+    except Exception:
+        result = {
+            "status": "down",
+            "ready": False,
+            "url": LLM_BASE_URL,
+            "error": "port unreachable",
+        }
+        _health_cache["data"] = result
+        _health_cache["ts"] = now
+        return result
+
     client = get_llm_client()
     url = f"{LLM_BASE_URL}/v1/models"
     try:
         t0 = time.perf_counter()
-        resp = client.get(url, timeout=4.0)
+        resp = client.get(url, timeout=3.0)
         ping_ms = round((time.perf_counter() - t0) * 1000, 1)
         if resp.status_code == 200:
             data = resp.json()
             models = data.get("data", []) or data.get("models", [])
             model_id = models[0].get("id") or models[0].get("name") if models else LLM_MODEL
-            return {
+            result = {
                 "status": "ok",
                 "ready": True,
                 "url": LLM_BASE_URL,
                 "model": os.path.basename(str(model_id)),
                 "pingMs": ping_ms,
             }
-        return {
+            _health_cache["data"] = result
+            _health_cache["ts"] = now
+            return result
+        result = {
             "status": "degraded",
             "ready": False,
             "url": LLM_BASE_URL,
             "httpCode": resp.status_code,
             "pingMs": ping_ms,
         }
+        _health_cache["data"] = result
+        _health_cache["ts"] = now
+        return result
     except Exception as exc:
-        return {
+        result = {
             "status": "down",
             "ready": False,
             "url": LLM_BASE_URL,
             "error": str(exc),
         }
+        _health_cache["data"] = result
+        _health_cache["ts"] = now
+        return result
 
 
 def stream_completion(

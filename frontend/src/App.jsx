@@ -16,13 +16,19 @@ import {
 import Sidebar from './components/Sidebar';
 import MessageBubble from './components/MessageBubble';
 import ZunoLogo from './components/ZunoLogo';
+import AuthModal from './components/AuthModal';
+import AdminDashboardModal from './components/AdminDashboardModal';
 import { useChatStream } from './hooks/useChatStream';
 import { useVoiceInput, SUPPORTED_LANGUAGES } from './hooks/useVoiceInput';
 import {
+  clearAuthSession,
   deleteConversation,
   deleteDoc,
+  getAuthToken,
   getHealth,
   getMessages,
+  getProfile,
+  getStoredUser,
   listConversations,
   renameConversation,
   uploadDoc,
@@ -32,6 +38,13 @@ export default function App() {
   const [conversations, setConversations] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [input, setInput] = useState('');
+  const [user, setUser] = useState(() => getStoredUser());
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authQuotaExceeded, setAuthQuotaExceeded] = useState(false);
+  const [adminModalOpen, setAdminModalOpen] = useState(false);
+  const [guestCount, setGuestCount] = useState(() => {
+    return parseInt(localStorage.getItem('zero_guest_questions_count') || '0', 10);
+  });
   const mode = 'auto';
   const [useWeb, setUseWeb] = useState(null); // null = auto-detect, true = always web search
   const [pendingDocs, setPendingDocs] = useState([]);
@@ -65,6 +78,11 @@ export default function App() {
     onConversationCreated: (newId) => {
       setActiveId(newId);
       refreshConversations();
+    },
+    onDoneComplete: () => {
+      if (getAuthToken()) {
+        getProfile().then((p) => setUser(p)).catch(() => {});
+      }
     },
   });
 
@@ -110,6 +128,14 @@ export default function App() {
   useEffect(() => {
     refreshHealth();
     refreshConversations();
+    if (getAuthToken()) {
+      getProfile()
+        .then((profile) => setUser(profile))
+        .catch(() => {
+          clearAuthSession();
+          setUser(null);
+        });
+    }
     const timer = setInterval(refreshHealth, 12000);
     return () => clearInterval(timer);
   }, []);
@@ -203,6 +229,18 @@ export default function App() {
     const promptText = input.trim();
     if (!promptText || isStreaming) return;
 
+    // Enforce 5-question limit for guest users (not logged in)
+    if (!user) {
+      if (guestCount >= 5) {
+        setAuthQuotaExceeded(true);
+        setAuthModalOpen(true);
+        return;
+      }
+      const newCount = guestCount + 1;
+      setGuestCount(newCount);
+      localStorage.setItem('zero_guest_questions_count', String(newCount));
+    }
+
     const outgoingAttachments = pendingDocs.map(({ id, name }) => ({ id, name }));
     setError('');
     setInput('');
@@ -233,6 +271,20 @@ export default function App() {
     e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
   };
 
+  const handleAuthSuccess = (authenticatedUser) => {
+    setUser(authenticatedUser);
+    setAuthQuotaExceeded(false);
+    refreshConversations();
+  };
+
+  const handleLogout = () => {
+    clearAuthSession();
+    setUser(null);
+    setActiveId(null);
+    setMessages([]);
+    refreshConversations();
+  };
+
   const displayError = error || streamError || voiceError;
 
   return (
@@ -247,6 +299,14 @@ export default function App() {
         health={health}
         isOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        user={user}
+        guestCount={guestCount}
+        onOpenAuth={() => {
+          setAuthQuotaExceeded(false);
+          setAuthModalOpen(true);
+        }}
+        onOpenAdmin={() => setAdminModalOpen(true)}
+        onLogout={handleLogout}
       />
 
       <main className="flex flex-1 flex-col overflow-hidden">
@@ -442,6 +502,19 @@ export default function App() {
           </div>
         </footer>
       </main>
+
+      <AuthModal
+        isOpen={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onAuthSuccess={handleAuthSuccess}
+        quotaExceeded={authQuotaExceeded}
+        initialMode={authQuotaExceeded ? 'register' : 'login'}
+      />
+
+      <AdminDashboardModal
+        isOpen={adminModalOpen}
+        onClose={() => setAdminModalOpen(false)}
+      />
     </div>
   );
 }

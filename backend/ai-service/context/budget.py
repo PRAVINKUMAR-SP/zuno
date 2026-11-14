@@ -59,3 +59,4 @@ def calculate_budget(
         "intent": intent,
         "is_tamil": is_tamil,
     }
+

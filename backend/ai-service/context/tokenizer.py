@@ -10,7 +10,7 @@ import httpx
 
 _tokenizer_lock = threading.Lock()
 _tokenizer_instance: Any = None
-_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.194.51.83:8000").rstrip("/")
+_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.32.13.83:8000").rstrip("/")
 
 
 def get_tokenizer():
@@ -115,3 +115,4 @@ def verify_count_with_server(prompt: str) -> tuple[int, int, bool]:
     except Exception as exc:
         return local_count, -1, False
     return local_count, -1, False
+

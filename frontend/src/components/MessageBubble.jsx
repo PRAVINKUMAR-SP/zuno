@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Check, Clock, Copy, FileText } from 'lucide-react';
 import ZunoLogo from './ZunoLogo';
+import GeneratedComic from './GeneratedComic';
+import ComicLoading from './ComicLoading';
 import '../styles/streaming.css';
 
 function prepareStreamingMarkdown(text, isStreaming) {
@@ -172,6 +174,12 @@ const MessageBubble = memo(function MessageBubble({ message, isStreaming }) {
             </div>
           )}
         </div>
+
+        {/* Visual Comic output if available */}
+        {message.visual && <GeneratedComic visual={message.visual} />}
+
+        {/* Visual Comic generating state */}
+        {!message.visual && message.visualStatus === 'generating' && <ComicLoading />}
 
         {isStreaming && message.content && (
           <div className="mt-2 inline-flex items-center gap-2 text-xs text-zinc-400">

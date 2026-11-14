@@ -26,6 +26,9 @@ public class Conversation {
     @Column(nullable = false, length = 200)
     private String title = "New Chat";
 
+    @Column(name = "user_id")
+    private Long userId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -70,6 +73,14 @@ public class Conversation {
 
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public Long getUserId() {
+        return userId;
+    }
+
+    public void setUserId(Long userId) {
+        this.userId = userId;
     }
 
     public List<ChatMessage> getMessages() {

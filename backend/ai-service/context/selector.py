@@ -93,3 +93,4 @@ def select_web_results(
         consumed += line_tokens
 
     return selected, lines, consumed
+

@@ -8,9 +8,11 @@ import com.zuno.backend.dto.RenameConversationDto;
 import com.zuno.backend.entity.UserMemory;
 import com.zuno.backend.service.AiClientService;
 import com.zuno.backend.service.AiClientService.AiStreamResult;
+import com.zuno.backend.service.AuthService;
 import com.zuno.backend.service.ChatService;
 import com.zuno.backend.service.ChatService.PreparedChat;
 import com.zuno.backend.service.MemoryService;
+import com.zuno.backend.util.AuthUtil;
 import jakarta.validation.Valid;
 import java.io.IOException;
 import java.io.InputStream;
@@ -44,6 +46,7 @@ public class ChatController {
     private final ChatService chatService;
     private final AiClientService aiClientService;
     private final MemoryService memoryService;
+    private final AuthService authService;
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
     private final ExecutorService streamExecutor = Executors.newVirtualThreadPerTaskExecutor();
@@ -52,11 +55,13 @@ public class ChatController {
             ChatService chatService,
             AiClientService aiClientService,
             MemoryService memoryService,
+            AuthService authService,
             DataSource dataSource,
             ObjectMapper objectMapper) {
         this.chatService = chatService;
         this.aiClientService = aiClientService;
         this.memoryService = memoryService;
+        this.authService = authService;
         this.dataSource = dataSource;
         this.objectMapper = objectMapper;
     }
@@ -78,14 +83,19 @@ public class ChatController {
     }
 
     @GetMapping("/conversations")
-    public List<ConversationDto> listConversations() {
-        return chatService.listConversations();
+    public List<ConversationDto> listConversations(
+            @org.springframework.web.bind.annotation.RequestHeader(value = "Authorization", required = false) String authHeader) {
+        AuthUtil.TokenInfo info = AuthController.extractTokenInfo(authHeader);
+        return chatService.listConversations(info != null ? info.userId() : null);
     }
 
     @PostMapping("/conversations")
-    public ConversationDto createConversation(@RequestBody(required = false) Map<String, String> body) {
+    public ConversationDto createConversation(
+            @RequestBody(required = false) Map<String, String> body,
+            @org.springframework.web.bind.annotation.RequestHeader(value = "Authorization", required = false) String authHeader) {
+        AuthUtil.TokenInfo info = AuthController.extractTokenInfo(authHeader);
         String title = body == null ? "New Chat" : body.getOrDefault("title", "New Chat");
-        return chatService.createConversation(title);
+        return chatService.createConversation(title, info != null ? info.userId() : null);
     }
 
     @PatchMapping("/conversations/{id}")
@@ -137,10 +147,14 @@ public class ChatController {
     }
 
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter chatStream(@Valid @RequestBody ChatRequestDto req) {
+    public SseEmitter chatStream(
+            @Valid @RequestBody ChatRequestDto req,
+            @org.springframework.web.bind.annotation.RequestHeader(value = "Authorization", required = false) String authHeader) {
         SseEmitter emitter = new SseEmitter(160_000L);
         String mode = req.normalizedMode();
-        PreparedChat prepared = chatService.prepareUserTurn(req);
+        AuthUtil.TokenInfo tokenInfo = AuthController.extractTokenInfo(authHeader);
+        Long userId = tokenInfo != null ? tokenInfo.userId() : null;
+        PreparedChat prepared = chatService.prepareUserTurn(req, userId);
 
         AtomicBoolean cancelled = new AtomicBoolean(false);
         AtomicReference<InputStream> upstreamRef = new AtomicReference<>();
@@ -183,6 +197,21 @@ public class ChatController {
                                 sendEventQuietly(emitter, "sources", Map.of("type", "sources", "sources", sources), cancelUpstream);
                             }
                         },
+                        vStatus -> {
+                            if (!cancelled.get() && vStatus != null) {
+                                sendEventQuietly(emitter, "visual_status", vStatus, cancelUpstream);
+                            }
+                        },
+                        vReady -> {
+                            if (!cancelled.get() && vReady != null) {
+                                sendEventQuietly(emitter, "visual_ready", vReady, cancelUpstream);
+                            }
+                        },
+                        vError -> {
+                            if (!cancelled.get() && vError != null) {
+                                sendEventQuietly(emitter, "visual_error", vError, cancelUpstream);
+                            }
+                        },
                         () -> {
                             if (!cancelled.get()) {
                                 sendKeepaliveQuietly(emitter, cancelUpstream);
@@ -206,7 +235,8 @@ public class ChatController {
                                 prepared.conversationId(),
                                 result.content(),
                                 totalMs,
-                                resolvedMode
+                                resolvedMode,
+                                result.visual()
                         );
                     }
                     return;
@@ -216,8 +246,16 @@ public class ChatController {
                         prepared.conversationId(),
                         result.content(),
                         totalMs,
-                        resolvedMode
+                        resolvedMode,
+                        result.visual()
                 );
+
+                long promptTokens = req.message().length() / 4;
+                long completionTokens = (result.content() != null ? result.content().length() : 0) / 4;
+                long turnTokens = Math.max(10, promptTokens + completionTokens);
+                if (userId != null) {
+                    authService.recordTokenUsage(userId, turnTokens);
+                }
 
                 Map<String, Object> donePayload = new LinkedHashMap<>();
                 donePayload.put("type", "done");
@@ -230,6 +268,8 @@ public class ChatController {
                 donePayload.put("mode", resolvedMode);
                 donePayload.put("toolsUsed", result.toolsUsed());
                 donePayload.put("sources", result.sources());
+                donePayload.put("visual", result.visual());
+                donePayload.put("tokensUsed", turnTokens);
                 sendEvent(emitter, "done", donePayload);
                 emitter.complete();
             } catch (Exception ex) {

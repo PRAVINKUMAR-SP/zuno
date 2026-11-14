@@ -39,6 +39,9 @@ public class ChatMessage {
     @Column(name = "attachments_json", columnDefinition = "TEXT")
     private String attachmentsJson;
 
+    @Column(name = "visual_json", columnDefinition = "TEXT")
+    private String visualJson;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -97,6 +100,14 @@ public class ChatMessage {
 
     public void setAttachmentsJson(String attachmentsJson) {
         this.attachmentsJson = attachmentsJson;
+    }
+
+    public String getVisualJson() {
+        return visualJson;
+    }
+
+    public void setVisualJson(String visualJson) {
+        this.visualJson = visualJson;
     }
 
     public Instant getCreatedAt() {

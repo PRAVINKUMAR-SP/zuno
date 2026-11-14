@@ -67,3 +67,4 @@ def select_history(
     for turn in selected_turns:
         result.extend(turn)
     return result
+

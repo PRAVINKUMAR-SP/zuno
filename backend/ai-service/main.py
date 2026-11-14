@@ -21,6 +21,9 @@ import rag_store
 import tools_layer
 from config.settings import CONTEXT_SIZE
 from context.manager import build_context
+from visual.visual_manager import maybe_generate_visual
+from visual.visual_classifier import should_generate_visual
+from visual.comic_client import check_comic_service_health
 
 load_dotenv()
 
@@ -45,7 +48,8 @@ def get_base_system_prompt(is_tamil: bool = False) -> str:
         "1. Answer concisely in natural language directly.\n"
         "2. For current events, offices (CM, PM, TVK = Tamilaga Vettri Kazhagam, Vijay), strictly rely on provided live web context. Never say 'I cannot check the internet' — web search is active.\n"
         "3. When user provides updates or corrections, verify and confirm them gracefully without debate.\n"
-        "4. Historical entities: Raja Raja Cholan / Cholas / Pandyas are ancient kings and empires, never grammar terms."
+        "4. Historical entities: Raja Raja Cholan / Cholas / Pandyas are ancient kings and empires, never grammar terms.\n"
+        "5. Visual requests: When asked for images, diagrams, pictures, or comics, NEVER say 'I cannot provide images'. ZERO has an integrated XKCD comic illustrator that automatically creates visuals for your response. Explain the concept thoroughly and structurally."
     )
 
 INTENT_SETTINGS = {
@@ -309,6 +313,7 @@ class ChatRequest(BaseModel):
 @app.get("/health")
 def health():
     health_info = llm_client.check_server_health()
+    comic_info = check_comic_service_health()
     return {
         "status": "ok" if health_info.get("ready") else "degraded",
         "ready": health_info.get("ready", False),
@@ -316,6 +321,7 @@ def health():
         "model": health_info.get("model", MODEL_NAME),
         "pingMs": health_info.get("pingMs", 0),
         "docsCount": len(rag_store.list_docs()),
+        "comic": comic_info,
     }
 
 
@@ -499,6 +505,7 @@ def _run_inference(
     cancel_event: threading.Event,
     tools_used: list[str] | None = None,
     sources: list[dict] | None = None,
+    original_query: str = "",
 ) -> None:
     """Component 4 (AI Engine): Stream completion inside single worker thread (deadlock-free)."""
     start = time.perf_counter()
@@ -580,6 +587,18 @@ def _run_inference(
             raw_text = "".join(chunks)
             needs_trim = stopped_by_budget or hit_length or stopped_by_repetition
             final_text = format_response(raw_text, needs_trim)
+
+            # Check if an XKCD visual comic should be generated for this answer
+            visual_data = None
+            comic_health = check_comic_service_health()
+            if comic_health.get("ready") and original_query and should_generate_visual(original_query, intent=intent, response_text=final_text):
+                out_queue.put(("visual_status", {"status": "generating", "message": "Drawing comic illustration..."}))
+                visual_data = maybe_generate_visual(original_query, response_text=final_text, intent=intent, cancel_event=cancel_event)
+                if visual_data:
+                    out_queue.put(("visual_ready", visual_data))
+                else:
+                    out_queue.put(("visual_error", {"message": "Comic service unavailable or timed out"}))
+
             out_queue.put((
                 "done",
                 {
@@ -590,6 +609,7 @@ def _run_inference(
                     "intent": intent,
                     "toolsUsed": tools_used or [],
                     "sources": sources or [],
+                    "visual": visual_data,
                 },
             ))
     except Exception as exc:
@@ -766,6 +786,7 @@ def _submit_inference(req: ChatRequest):
         cancel_event,
         tools_used,
         sources,
+        current_question,
     )
     return future, out_queue, cancel_event
 
@@ -805,6 +826,15 @@ async def chat_stream(req: ChatRequest):
                 if kind == "sources":
                     src_payload = json.dumps({"type": "sources", "sources": value})
                     yield f"event: sources\ndata: {src_payload}\n\n"
+                elif kind == "visual_status":
+                    v_status_payload = json.dumps({"type": "visual_status", **(value if isinstance(value, dict) else {})})
+                    yield f"event: visual_status\ndata: {v_status_payload}\n\n"
+                elif kind == "visual_ready":
+                    v_ready_payload = json.dumps({"type": "visual_ready", **(value if isinstance(value, dict) else {})})
+                    yield f"event: visual_ready\ndata: {v_ready_payload}\n\n"
+                elif kind == "visual_error":
+                    v_err_payload = json.dumps({"type": "visual_error", **(value if isinstance(value, dict) else {})})
+                    yield f"event: visual_error\ndata: {v_err_payload}\n\n"
                 elif kind == "token":
                     # Drain consecutive token chunks in order to keep SSE frames smooth and compact.
                     token_parts = [str(value)]

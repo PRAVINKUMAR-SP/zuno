@@ -62,3 +62,4 @@ def test_budget_invariance_sum():
 def test_invalid_context_budget_overflow():
     with pytest.raises(ValueError):
         calculate_budget(intent="coding", context_size=500)
+

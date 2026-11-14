@@ -4,7 +4,7 @@ import { streamChat } from '../api/zunoApi';
 /**
  * Custom hook to manage real-time chat streaming, token batching (40ms), and cancellation.
  */
-export function useChatStream({ onConversationCreated } = {}) {
+export function useChatStream({ onConversationCreated, onDoneComplete } = {}) {
   const [messages, setMessages] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [activeMessageId, setActiveMessageId] = useState(null);
@@ -129,6 +129,27 @@ export function useChatStream({ onConversationCreated } = {}) {
               );
             }
           },
+          onVisualStatus: (vStatus) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === tempBotId ? { ...m, visualStatus: vStatus?.status || 'generating' } : m
+              )
+            );
+          },
+          onVisualReady: (vReady) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === tempBotId ? { ...m, visual: vReady, visualStatus: 'ready' } : m
+              )
+            );
+          },
+          onVisualError: () => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === tempBotId ? { ...m, visualStatus: 'idle' } : m
+              )
+            );
+          },
           onToken: (delta) => {
             if (!delta || controller.signal.aborted) return;
             if (firstTokenMs === null) {
@@ -154,6 +175,8 @@ export function useChatStream({ onConversationCreated } = {}) {
                       mode: doneEvt.mode || mode,
                       toolsUsed: doneEvt.toolsUsed || [],
                       sources: doneEvt.sources || m.sources || [],
+                      visual: doneEvt.visual || m.visual,
+                      visualStatus: doneEvt.visual ? 'ready' : (m.visual ? 'ready' : 'idle'),
                     }
                   : m
               )
@@ -161,6 +184,7 @@ export function useChatStream({ onConversationCreated } = {}) {
             setIsStreaming(false);
             setActiveMessageId(null);
             abortRef.current = null;
+            onDoneComplete?.(doneEvt);
           },
           onError: (err) => {
             flushTokenBuffer();
@@ -170,6 +194,7 @@ export function useChatStream({ onConversationCreated } = {}) {
             setIsStreaming(false);
             setActiveMessageId(null);
             abortRef.current = null;
+            onDoneComplete?.(doneEvt);
           },
         });
       } catch (err) {

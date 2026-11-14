@@ -39,7 +39,8 @@ public class AiClientService {
             boolean truncated,
             String intent,
             List<String> toolsUsed,
-            List<Map<String, String>> sources) {}
+            List<Map<String, String>> sources,
+            Map<String, Object> visual) {}
 
     public AiClientService(
             ObjectMapper objectMapper,
@@ -58,7 +59,7 @@ public class AiClientService {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/health"))
-                    .timeout(Duration.ofSeconds(3))
+                    .timeout(Duration.ofSeconds(7))
                     .GET()
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -130,7 +131,7 @@ public class AiClientService {
             Runnable onKeepalive,
             AtomicBoolean cancelled,
             AtomicReference<InputStream> upstreamRef) throws Exception {
-        return streamChat(messages, mode, useWeb, docIds, onToken, null, onKeepalive, cancelled, upstreamRef);
+        return streamChat(messages, mode, useWeb, docIds, onToken, null, null, null, null, onKeepalive, cancelled, upstreamRef);
     }
 
     public AiStreamResult streamChat(
@@ -140,6 +141,9 @@ public class AiClientService {
             List<String> docIds,
             Consumer<String> onToken,
             Consumer<List<Map<String, String>>> onSources,
+            Consumer<Map<String, Object>> onVisualStatus,
+            Consumer<Map<String, Object>> onVisualReady,
+            Consumer<Map<String, Object>> onVisualError,
             Runnable onKeepalive,
             AtomicBoolean cancelled,
             AtomicReference<InputStream> upstreamRef) throws Exception {
@@ -164,7 +168,7 @@ public class AiClientService {
         upstreamRef.set(bodyStream);
         if (cancelled.get()) {
             bodyStream.close();
-            return new AiStreamResult("", 0, false, mode, List.of(), List.of());
+            return new AiStreamResult("", 0, false, mode, List.of(), List.of(), null);
         }
 
         StringBuilder fullContent = new StringBuilder();
@@ -173,6 +177,7 @@ public class AiClientService {
         String resolvedIntent = mode;
         List<String> toolsUsed = List.of();
         List<Map<String, String>> sources = List.of();
+        Map<String, Object> visual = null;
         boolean receivedDone = false;
 
         try (BufferedReader reader = new BufferedReader(
@@ -204,6 +209,26 @@ public class AiClientService {
                             }
                         }
                     }
+                    case "visual_status" -> {
+                        Map<String, Object> statusMap = parseMap(event);
+                        if (onVisualStatus != null && statusMap != null) {
+                            onVisualStatus.accept(statusMap);
+                        }
+                    }
+                    case "visual_ready" -> {
+                        Map<String, Object> readyMap = parseMap(event);
+                        if (readyMap != null) {
+                            visual = readyMap;
+                            if (onVisualReady != null) {
+                                onVisualReady.accept(readyMap);
+                            }
+                        }
+                    }
+                    case "visual_error" -> {
+                        if (onVisualError != null) {
+                            onVisualError.accept(parseMap(event));
+                        }
+                    }
                     case "token" -> {
                         String delta = event.path("content").asString("");
                         if (delta.isEmpty()) {
@@ -232,6 +257,12 @@ public class AiClientService {
                         if (!doneSources.isEmpty()) {
                             sources = doneSources;
                         }
+                        if (event.has("visual") && !event.path("visual").isNull() && !event.path("visual").isMissingNode()) {
+                            Map<String, Object> doneVisual = parseMap(event.path("visual"));
+                            if (doneVisual != null) {
+                                visual = doneVisual;
+                            }
+                        }
                     }
                     case "error" -> throw new IllegalStateException(
                             event.path("message").asString("Unknown AI error"));
@@ -250,7 +281,7 @@ public class AiClientService {
                     + mode + ", chars=" + fullContent.length() + ")");
         }
 
-        return new AiStreamResult(fullContent.toString(), elapsedMs, truncated, resolvedIntent, toolsUsed, sources);
+        return new AiStreamResult(fullContent.toString(), elapsedMs, truncated, resolvedIntent, toolsUsed, sources, visual);
     }
 
     public AiStreamResult chatSync(List<AiMessage> messages, String mode, Boolean useWeb, List<String> docIds) throws Exception {
@@ -275,8 +306,21 @@ public class AiClientService {
                 root.path("truncated").asBoolean(false),
                 intentVal.isBlank() ? mode : intentVal,
                 parseStringList(root.path("toolsUsed")),
-                parseSources(root.path("sources"))
+                parseSources(root.path("sources")),
+                parseMap(root.path("visual"))
         );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseMap(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        try {
+            return objectMapper.convertValue(node, Map.class);
+        } catch (Exception ex) {
+            return null;
+        }
     }
 
     public JsonNode listDocs() throws Exception {

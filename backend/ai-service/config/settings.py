@@ -7,7 +7,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Model & Server Configuration
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.194.51.83:8000").rstrip("/")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.32.13.83:8000").rstrip("/")
 LLM_MODEL = os.getenv("LLM_MODEL", "/home/opffarmy/ZERO/models/Qwen3-4B-Q4_K_M.gguf")
 LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen3-4B-Q4_K_M")
 
@@ -31,3 +31,10 @@ OUTPUT_BUDGETS = {
 # Maximum allowed history turns and char cutoff for conversation handler
 MAX_HISTORY_TURNS = int(os.getenv("ZUNO_MAX_HISTORY_TURNS", "10"))
 MAX_HISTORY_CHARS = int(os.getenv("ZUNO_MAX_HISTORY_CHARS", "2400"))
+
+# Visual Comic Service Configuration (XKCD Artist on Ubuntu)
+COMIC_SERVICE_URL = os.getenv("COMIC_SERVICE_URL", "http://10.32.13.83:8002").rstrip("/")
+COMIC_ENABLED = os.getenv("COMIC_ENABLED", "true").lower() in ("1", "true", "yes")
+COMIC_TIMEOUT = float(os.getenv("COMIC_TIMEOUT", "45.0"))
+
+

@@ -54,17 +54,33 @@ public class ChatService {
     }
 
     @Transactional(readOnly = true)
-    public List<ConversationDto> listConversations() {
+    public List<ConversationDto> listConversations(Long userId) {
+        if (userId != null) {
+            return conversationRepository.findAllByUserIdOrderByUpdatedAtDesc(userId).stream()
+                    .map(this::toDto)
+                    .toList();
+        }
         return conversationRepository.findAllByOrderByUpdatedAtDesc().stream()
                 .map(this::toDto)
                 .toList();
     }
 
+    @Transactional(readOnly = true)
+    public List<ConversationDto> listConversations() {
+        return listConversations(null);
+    }
+
     @Transactional
-    public ConversationDto createConversation(String title) {
+    public ConversationDto createConversation(String title, Long userId) {
         Conversation conv = new Conversation();
         conv.setTitle((title == null || title.isBlank()) ? "New Chat" : title.trim());
+        conv.setUserId(userId);
         return toDto(conversationRepository.save(conv));
+    }
+
+    @Transactional
+    public ConversationDto createConversation(String title) {
+        return createConversation(title, null);
     }
 
     @Transactional
@@ -90,13 +106,22 @@ public class ChatService {
 
     @Transactional
     public PreparedChat prepareUserTurn(ChatRequestDto req) {
+        return prepareUserTurn(req, null);
+    }
+
+    @Transactional
+    public PreparedChat prepareUserTurn(ChatRequestDto req, Long userId) {
         Conversation conv = req.conversationId() != null
                 ? conversationRepository.findById(req.conversationId()).orElse(null)
                 : null;
         if (conv == null) {
             conv = new Conversation();
             conv.setTitle(deriveTitle(req.message()));
+            conv.setUserId(userId);
             conv = conversationRepository.save(conv);
+        } else if (conv.getUserId() == null && userId != null) {
+            conv.setUserId(userId);
+            conversationRepository.save(conv);
         }
 
         if ("New Chat".equals(conv.getTitle())) {
@@ -161,7 +186,7 @@ public class ChatService {
     }
 
     @Transactional
-    public MessageDto saveAssistantMessage(Long conversationId, String content, long elapsedMs, String mode) {
+    public MessageDto saveAssistantMessage(Long conversationId, String content, long elapsedMs, String mode, java.util.Map<String, Object> visual) {
         Conversation conv = findConversation(conversationId);
         String safeContent = (content == null || content.isBlank())
                 ? "I could not generate a response. Please try again."
@@ -173,12 +198,23 @@ public class ChatService {
         assistantMessage.setContent(safeContent);
         assistantMessage.setResponseTimeMs(elapsedMs);
         assistantMessage.setMode(mode);
+        if (visual != null && !visual.isEmpty()) {
+            try {
+                assistantMessage.setVisualJson(objectMapper.writeValueAsString(visual));
+            } catch (Exception ignored) {
+            }
+        }
         ChatMessage saved = chatMessageRepository.save(assistantMessage);
 
         conv.setUpdatedAt(Instant.now());
         conversationRepository.save(conv);
 
         return toDto(saved);
+    }
+
+    @Transactional
+    public MessageDto saveAssistantMessage(Long conversationId, String content, long elapsedMs, String mode) {
+        return saveAssistantMessage(conversationId, content, elapsedMs, mode, null);
     }
 
     public ChatResponseDto chatSync(ChatRequestDto req) throws Exception {
@@ -241,6 +277,18 @@ public class ChatService {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private java.util.Map<String, Object> parseVisual(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, java.util.Map.class);
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
     private MessageDto toDto(ChatMessage m) {
         return new MessageDto(
                 m.getId(),
@@ -250,6 +298,7 @@ public class ChatService {
                 m.getResponseTimeMs(),
                 m.getMode(),
                 parseAttachments(m.getAttachmentsJson()),
+                parseVisual(m.getVisualJson()),
                 m.getCreatedAt()
         );
     }
